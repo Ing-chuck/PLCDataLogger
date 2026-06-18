@@ -3,6 +3,14 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
+# PLC Data Logger runtime artifacts (local data, app logs, OPC UA pki store, scratch)
+data/
+pki/
+*.db
+*.db-shm
+*.db-wal
+run.out
+
 # User-specific files
 *.rsuser
 *.suo
@@ -10,6 +18,8 @@
 *.userosscache
 *.sln.docstates
 *.env
+
+.[Cc]laude/
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
