@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Opc.Ua;
 using PlcDataLogger.Configuration;
+using PlcDataLogger.Health;
 using PlcDataLogger.Storage;
 
 namespace PlcDataLogger.OpcUa;
@@ -19,6 +20,7 @@ public sealed class OpcUaClientManager : BackgroundService
     private readonly LoggerOptions _options;
     private readonly LoggerDatabase _db;
     private readonly ReadingBuffer _buffer;
+    private readonly HealthMonitor _health;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<OpcUaClientManager> _log;
     private readonly List<OpcUaPlcSession> _sessions = new();
@@ -27,12 +29,14 @@ public sealed class OpcUaClientManager : BackgroundService
         IOptions<LoggerOptions> options,
         LoggerDatabase db,
         ReadingBuffer buffer,
+        HealthMonitor health,
         ILoggerFactory loggerFactory,
         ILogger<OpcUaClientManager> log)
     {
         _options = options.Value;
         _db = db;
         _buffer = buffer;
+        _health = health;
         _loggerFactory = loggerFactory;
         _log = log;
     }
@@ -77,7 +81,7 @@ public sealed class OpcUaClientManager : BackgroundService
 
         while (!ct.IsCancellationRequested)
         {
-            var session = new OpcUaPlcSession(plc, _options.Subscription, filter, appConfig, _db, _buffer, sessionLogger);
+            var session = new OpcUaPlcSession(plc, _options.Subscription, filter, appConfig, _db, _buffer, _health, sessionLogger);
             try
             {
                 await session.StartAsync(ct).ConfigureAwait(false);
@@ -100,6 +104,7 @@ public sealed class OpcUaClientManager : BackgroundService
             {
                 lock (_sessions) _sessions.Remove(session);
                 await session.DisposeAsync().ConfigureAwait(false);
+                _health.SetDisconnected(plc.Name, ex.Message);
                 _log.LogError(ex, "[{Plc}] Connection failed; retrying in {Delay}s.",
                     plc.Name, ConnectRetryDelay.TotalSeconds);
                 try { await Task.Delay(ConnectRetryDelay, ct).ConfigureAwait(false); }

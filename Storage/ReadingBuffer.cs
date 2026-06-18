@@ -15,6 +15,19 @@ public sealed class ReadingBuffer
             SingleWriter = false,
         });
 
-    public ChannelWriter<Reading> Writer => _channel.Writer;
+    private long _enqueued;
+
     public ChannelReader<Reading> Reader => _channel.Reader;
+
+    /// <summary>Total readings ever accepted into the buffer (for queue-depth health).</summary>
+    public long Enqueued => Interlocked.Read(ref _enqueued);
+
+    /// <summary>Enqueue a reading, counting it for queue-depth reporting.</summary>
+    public bool TryWrite(Reading reading)
+    {
+        if (!_channel.Writer.TryWrite(reading))
+            return false;
+        Interlocked.Increment(ref _enqueued);
+        return true;
+    }
 }

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using PlcDataLogger.Health;
 
 namespace PlcDataLogger.Storage;
 
@@ -14,13 +15,15 @@ public sealed class StorageWriter : BackgroundService
 
     private readonly ReadingBuffer _buffer;
     private readonly LoggerDatabase _db;
+    private readonly HealthMonitor _health;
     private readonly ILogger<StorageWriter> _log;
     private readonly HashSet<int> _typedTags = new();
 
-    public StorageWriter(ReadingBuffer buffer, LoggerDatabase db, ILogger<StorageWriter> log)
+    public StorageWriter(ReadingBuffer buffer, LoggerDatabase db, HealthMonitor health, ILogger<StorageWriter> log)
     {
         _buffer = buffer;
         _db = db;
+        _health = health;
         _log = log;
     }
 
@@ -50,6 +53,7 @@ public sealed class StorageWriter : BackgroundService
 
                 _db.InsertReadings(batch);
                 RecordNewlyTypedTags(batch);
+                _health.AddWritten(batch.Count);
                 _log.LogDebug("Persisted {Count} readings.", batch.Count);
                 batch.Clear();
             }

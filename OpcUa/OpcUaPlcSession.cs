@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Opc.Ua;
 using Opc.Ua.Client;
 using PlcDataLogger.Configuration;
+using PlcDataLogger.Health;
 using PlcDataLogger.Storage;
 using ISession = Opc.Ua.Client.ISession;
 using SubscriptionOptions = PlcDataLogger.Configuration.SubscriptionOptions;
@@ -25,6 +26,7 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
     private readonly ApplicationConfiguration _appConfig;
     private readonly LoggerDatabase _db;
     private readonly ReadingBuffer _buffer;
+    private readonly HealthMonitor _health;
     private readonly ILogger _log;
 
     private Session? _session;
@@ -39,6 +41,7 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
         ApplicationConfiguration appConfig,
         LoggerDatabase db,
         ReadingBuffer buffer,
+        HealthMonitor health,
         ILogger log)
     {
         _plc = plc;
@@ -47,6 +50,7 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
         _appConfig = appConfig;
         _db = db;
         _buffer = buffer;
+        _health = health;
         _log = log;
     }
 
@@ -76,6 +80,7 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
             preferredLocales: null).ConfigureAwait(false);
 
         _session.KeepAlive += OnKeepAlive;
+        _health.SetConnected(_plc.Name, _plc.EndpointUrl);
         _log.LogInformation("[{Plc}] Connected.", _plc.Name);
 
         await RunDiscoveryAndSubscribeAsync(ct).ConfigureAwait(false);
@@ -91,6 +96,7 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
 
         var tagMap = _db.SyncTags(_plcId, discovered);
         await BuildSubscriptionAsync(discovered, tagMap, ct).ConfigureAwait(false);
+        _health.SetDiscovery(_plc.Name, discovered.Count, (int)(_subscription?.MonitoredItemCount ?? 0));
     }
 
     private async Task BuildSubscriptionAsync(
@@ -251,9 +257,10 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
         foreach (var value in item.DequeueValues())
         {
             var reading = ToReading(tagId, value);
-            if (!_buffer.Writer.TryWrite(reading))
+            if (!_buffer.TryWrite(reading))
                 _log.LogWarning("[{Plc}] Buffer rejected a reading for tag {TagId}.", _plc.Name, tagId);
         }
+        _health.MarkSample(_plc.Name);
     }
 
     private static Reading ToReading(int tagId, DataValue value)
@@ -308,6 +315,7 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
         if (_reconnectHandler is null)
         {
             _log.LogWarning("[{Plc}] Keep-alive failed ({Status}); starting reconnect.", _plc.Name, e.Status);
+            _health.SetDisconnected(_plc.Name, $"Keep-alive failed: {e.Status}");
             _reconnectHandler = new SessionReconnectHandler(reconnectAbort: true);
             _reconnectHandler.BeginReconnect(_session, ReconnectPeriodMs, OnReconnectComplete);
         }
@@ -323,6 +331,7 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
 
         _reconnectHandler?.Dispose();
         _reconnectHandler = null;
+        _health.SetConnected(_plc.Name, _plc.EndpointUrl);
         _log.LogInformation("[{Plc}] Reconnected.", _plc.Name);
     }
 

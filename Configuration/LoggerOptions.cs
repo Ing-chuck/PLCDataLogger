@@ -25,6 +25,14 @@ public sealed class LoggerOptions
     public ExportOptions Export { get; set; } = new();
 
     public UploadOptions Upload { get; set; } = new();
+
+    public WebUiOptions WebUi { get; set; } = new();
+}
+
+public sealed class WebUiOptions
+{
+    /// <summary>Local TCP port for the status/config web UI. Bound to localhost only (§11).</summary>
+    public int Port { get; set; } = 5198;
 }
 
 public sealed class StorageOptions

@@ -1,0 +1,124 @@
+@page "/"
+@inject HealthMonitor Health
+@implements IDisposable
+
+<div class="wrap">
+    @if (_s is null)
+    {
+        <h1>PLC Data Logger</h1>
+        <p class="sub">Starting…</p>
+    }
+    else
+    {
+        <h1>PLC Data Logger — @_s.SiteName</h1>
+        <p class="sub">Live status · updated @Local(_s.GeneratedUtc).ToString("HH:mm:ss")</p>
+
+        <div class="cards">
+            <div class="card">
+                <div class="label">Readings written</div>
+                <div class="value">@_s.ReadingsWritten.ToString("N0")</div>
+            </div>
+            <div class="card">
+                <div class="label">Last write</div>
+                <div class="value">@Ago(_s.LastWriteUtc)</div>
+            </div>
+            <div class="card">
+                <div class="label">Buffer depth</div>
+                <div class="value">@_s.BufferDepth</div>
+            </div>
+            <div class="card">
+                <div class="label">Free disk</div>
+                <div class="value @(_s.FreeDiskMb >= 0 && _s.FreeDiskMb < 1024 ? "warn" : "")">
+                    @(_s.FreeDiskMb < 0 ? "—" : $"{_s.FreeDiskMb:N0} MB")
+                </div>
+            </div>
+        </div>
+
+        <div class="cards">
+            <div class="card">
+                <div class="label">Upload provider</div>
+                <div class="value">@_s.UploadProvider</div>
+            </div>
+            <div class="card">
+                <div class="label">Last export</div>
+                <div class="value">@AgoIso(_s.LastExportUtc)</div>
+            </div>
+            <div class="card">
+                <div class="label">Last upload</div>
+                <div class="value">@(_s.UploadProvider == "None" ? "n/a" : AgoIso(_s.LastUploadUtc))</div>
+            </div>
+        </div>
+
+        <h2 style="font-size:1.05rem;margin:8px 0 10px;">PLCs</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Endpoint</th>
+                    <th>State</th>
+                    <th>Tags</th>
+                    <th>Monitored</th>
+                    <th>Last sample</th>
+                    <th>Note</th>
+                </tr>
+            </thead>
+            <tbody>
+                @if (_s.Plcs.Count == 0)
+                {
+                    <tr><td colspan="7" class="muted">No PLCs reporting yet…</td></tr>
+                }
+                @foreach (var plc in _s.Plcs)
+                {
+                    <tr>
+                        <td>@plc.Name</td>
+                        <td class="muted">@plc.EndpointUrl</td>
+                        <td>
+                            <span class="badge @(plc.Connected ? "ok" : "bad")">
+                                @(plc.Connected ? "Connected" : "Disconnected")
+                            </span>
+                        </td>
+                        <td>@plc.DiscoveredTags</td>
+                        <td>@plc.MonitoredItems</td>
+                        <td>@Ago(plc.LastSampleUtc)</td>
+                        <td class="muted">@plc.LastError</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+@code {
+    private HealthSnapshot? _s;
+    private Timer? _timer;
+
+    protected override void OnInitialized()
+    {
+        _s = Health.Snapshot();
+        _timer = new Timer(_ => InvokeAsync(() =>
+        {
+            _s = Health.Snapshot();
+            StateHasChanged();
+        }), null, 2000, 2000);
+    }
+
+    private static DateTime Local(DateTime utc) => utc.ToLocalTime();
+
+    private static string Ago(DateTime? utc)
+    {
+        if (utc is null) return "—";
+        var delta = DateTime.UtcNow - utc.Value;
+        if (delta < TimeSpan.Zero) delta = TimeSpan.Zero;
+        if (delta.TotalSeconds < 60) return $"{(int)delta.TotalSeconds}s ago";
+        if (delta.TotalMinutes < 60) return $"{(int)delta.TotalMinutes}m ago";
+        if (delta.TotalHours < 24) return $"{(int)delta.TotalHours}h ago";
+        return $"{(int)delta.TotalDays}d ago";
+    }
+
+    private static string AgoIso(string? iso) =>
+        DateTime.TryParse(iso, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var dt)
+            ? Ago(dt)
+            : "—";
+
+    public void Dispose() => _timer?.Dispose();
+}

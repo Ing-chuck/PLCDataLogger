@@ -18,7 +18,7 @@ currently built and how to run it.
 
 ## Status
 
-**Phases 1–3 are implemented and validated against a live PLC:**
+**Phases 1–4 (status/observability) are implemented and validated against a live PLC:**
 
 - Connects to one or more Codesys OPC UA servers (one session per PLC, independent reconnect).
 - Auto-discovers tags by browsing the address space (with continuation-point paging), filtered
@@ -32,9 +32,12 @@ currently built and how to run it.
 - Exports readings to **CSV** on a daily schedule and optionally uploads them via a pluggable
   cloud provider, then prunes old data under a retention policy — see
   [Export, upload & retention](#export-upload--retention).
+- Serves a **localhost-only status dashboard** plus a `/api/health` JSON endpoint showing
+  per-PLC connection state, last sample/write/export/upload, buffer depth, and free disk — see
+  [Status dashboard & health](#status-dashboard--health).
 
-Not yet built: the local web UI (status + configuration, incl. Google OAuth consent and network
-scan) — see [Roadmap](#roadmap).
+Not yet built: the **configuration** side of the web UI — editing PLC connections, the Google
+OAuth consent flow, and network scan for setup — see [Roadmap](#roadmap).
 
 ## Requirements
 
@@ -86,6 +89,9 @@ All settings live under the `Logger` section of [`appsettings.json`](appsettings
         "CredentialsPath": "google_client.json",
         "TokenStorePath": "google_token"
       }
+    },
+    "WebUi": {
+      "Port": 5198
     }
   }
 }
@@ -104,6 +110,7 @@ All settings live under the `Logger` section of [`appsettings.json`](appsettings
 | `Export.RunOnStartup` | Run one export shortly after startup (dev/verification). |
 | `Upload.Provider` | `None` (default) or `GoogleDrive`. |
 | `Upload.DestinationFolder` | Remote folder name files are uploaded into. |
+| `WebUi.Port` | Localhost port for the status dashboard and `/api/health`. |
 
 ### Tag discovery & filtering
 
@@ -227,6 +234,33 @@ than `Storage.RetentionDays`, in one of two modes:
 - **Upload disabled** (`None`) — prune purely by age. Very old data at offline sites is then only
   retrievable directly from the machine.
 
+## Status dashboard & health
+
+The logger hosts a small **Blazor Server** status page, bound to **localhost only** (`WebUi.Port`,
+default `5198`) — it's a convenience for whoever is physically at the machine, not a remotely
+accessible service (§11). Browse to:
+
+```text
+http://localhost:5198/
+```
+
+It shows, refreshing live: per-PLC connection state, discovered/monitored tag counts, last sample
+time, total readings written, buffer depth, the active upload provider, last export/upload times,
+and free disk space.
+
+The same data is available as JSON for monitoring or scripting:
+
+```text
+GET http://localhost:5198/api/health
+```
+
+The health view distinguishes "upload not configured" (neutral — expected for offline sites) from a
+configured provider, so a genuinely failing upload stands out (§9).
+
+> The web UI is currently **status only**. Editing PLC connections, the Google OAuth consent flow,
+> certificate-trust acceptance, and network scan for setup are the next increment — see
+> [Roadmap](#roadmap).
+
 ## Project layout
 
 ```text
@@ -235,7 +269,9 @@ OpcUa/           OPC UA application config, per-PLC session, discovery + tag fil
 Storage/         SQLite database, in-memory buffer, batched writer, CSV export, retention
 Upload/          Pluggable cloud upload abstraction (None + Google Drive, DPAPI token store)
 Export/          Scheduled export + upload orchestration
-Program.cs       Generic Host wiring (Serilog + Windows Service + hosted services)
+Health/          Runtime health collector surfaced to the web UI
+Components/      Blazor Server status dashboard (App, Routes, Pages/Dashboard)
+Program.cs       Web host wiring (Serilog + Windows Service + hosted services + Blazor)
 scripts/         Windows Service install / uninstall (PowerShell)
 ```
 
@@ -249,5 +285,6 @@ Built on the OPC Foundation reference stack (`OPCFoundation.NetStandard.Opc.Ua.C
 | 1 | Core logging: OPC UA discovery/subscription → SQLite | ✅ Done |
 | 2 | Multi-PLC + Windows Service hosting with auto-restart recovery | ✅ Done |
 | 3 | CSV export + pluggable cloud upload (Google Drive), retention/pruning | ✅ Done |
-| 4 | Local web UI (status + configuration, incl. network scan for setup) | Planned |
+| 4a | Observability: localhost status dashboard + `/api/health`, health monitor | ✅ Done |
+| 4b | Config UI: edit PLCs, Google OAuth consent, cert trust, network scan | Planned |
 | 5 | Multi-site hardening: config validation, packaging/install, field docs | Planned |

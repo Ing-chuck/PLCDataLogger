@@ -24,6 +24,7 @@ public sealed class LoggerDatabase : IDisposable
     private readonly string _databasePath;
     private SqliteConnection? _connection;
     private string? _fullPath;
+    private volatile bool _initialized;
 
     public LoggerDatabase(IOptions<LoggerOptions> options)
     {
@@ -51,8 +52,19 @@ public sealed class LoggerDatabase : IDisposable
             Execute("PRAGMA foreign_keys=ON;");
 
             Execute(SchemaSql);
+            _initialized = true;
         }
     }
+
+    /// <summary>True once the schema is ready (used by the health UI, which may load early).</summary>
+    public bool IsInitialized => _initialized;
+
+    /// <summary>ISO timestamp of the most recent export, or null.</summary>
+    public string? GetLastExportedAt() => ScalarString("SELECT MAX(exported_at) FROM upload_log;");
+
+    /// <summary>ISO timestamp of the most recent successful upload, or null.</summary>
+    public string? GetLastUploadedAt() =>
+        ScalarString("SELECT MAX(uploaded_at) FROM upload_log WHERE status = 'Uploaded';");
 
     /// <summary>Insert the PLC if new, returning its plc_id.</summary>
     public int UpsertPlc(string name, string endpointUrl, string securityPolicy)
@@ -282,6 +294,17 @@ public sealed class LoggerDatabase : IDisposable
             if (maxReadingIdInclusive is not null)
                 cmd.Parameters.AddWithValue("$maxId", maxReadingIdInclusive.Value);
             return cmd.ExecuteNonQuery();
+        }
+    }
+
+    private string? ScalarString(string sql)
+    {
+        lock (_gate)
+        {
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = sql;
+            var result = cmd.ExecuteScalar();
+            return result is null or DBNull ? null : result.ToString();
         }
     }
 
