@@ -18,7 +18,7 @@ currently built and how to run it.
 
 ## Status
 
-**Phases 1–2 are implemented and validated against a live PLC:**
+**Phases 1–3 are implemented and validated against a live PLC:**
 
 - Connects to one or more Codesys OPC UA servers (one session per PLC, independent reconnect).
 - Auto-discovers tags by browsing the address space (with continuation-point paging), filtered
@@ -29,8 +29,12 @@ currently built and how to run it.
   tags that disappear are marked inactive, never deleted, so history is preserved.
 - Runs as a **Windows Service** (auto-start, auto-restart on failure) for unattended operation,
   or as a console app for development — see [Run as a Windows Service](#run-as-a-windows-service).
+- Exports readings to **CSV** on a daily schedule and optionally uploads them via a pluggable
+  cloud provider, then prunes old data under a retention policy — see
+  [Export, upload & retention](#export-upload--retention).
 
-Not yet built: CSV export, cloud upload, and the local web UI — see [Roadmap](#roadmap).
+Not yet built: the local web UI (status + configuration, incl. Google OAuth consent and network
+scan) — see [Roadmap](#roadmap).
 
 ## Requirements
 
@@ -65,19 +69,41 @@ All settings live under the `Logger` section of [`appsettings.json`](appsettings
         "EndpointUrl": "opc.tcp://192.168.162.110:4840",
         "SecurityPolicy": "None"
       }
-    ]
+    ],
+    "Storage": {
+      "RetentionDays": 90,
+      "RetentionCheckIntervalMinutes": 60
+    },
+    "Export": {
+      "DirectoryPath": "exports",
+      "DailyAtLocalTime": "02:00",
+      "RunOnStartup": false
+    },
+    "Upload": {
+      "Provider": "None",
+      "DestinationFolder": "PLCDataLogger",
+      "GoogleDrive": {
+        "CredentialsPath": "google_client.json",
+        "TokenStorePath": "google_token"
+      }
+    }
   }
 }
 ```
 
 | Setting | Meaning |
 | --- | --- |
-| `SiteName` | Label for this deployment. |
+| `SiteName` | Label for this deployment (also used in export file names). |
 | `DatabasePath` | Where the SQLite database is written (created if missing). |
 | `Discovery.RescanIntervalMinutes` | How often to re-browse each PLC for tag changes. |
 | `Discovery.Filter` | Which discovered variables are logged — see below. |
 | `Subscription.*` | Publishing/sampling intervals and per-item server queue depth. |
 | `Plcs[]` | One entry per PLC: name, OPC UA endpoint, and security policy. |
+| `Storage.RetentionDays` | Prune readings older than this (0 = keep everything). |
+| `Export.DailyAtLocalTime` | Local time of day to run the CSV export, `HH:mm`. |
+| `Export.RunOnStartup` | Run one export shortly after startup (dev/verification). |
+| `Upload.Provider` | `None` (default) or `GoogleDrive`. |
+| `Upload.DestinationFolder` | Remote folder name files are uploaded into. |
 
 ### Tag discovery & filtering
 
@@ -170,18 +196,51 @@ To remove the service (leaving the install directory and data in place):
 .\scripts\uninstall-service.ps1
 ```
 
+## Export, upload & retention
+
+**CSV export.** Once a day (`Export.DailyAtLocalTime`) the logger writes all readings recorded
+since the last export to a long-format CSV in `Export.DirectoryPath` — one row per reading:
+`timestamp_utc, plc_name, tag_name, value, quality`. Each export is recorded in the `upload_log`
+table with the id range and row count. The export always runs, even with no internet, because the
+files are useful for manual pickup (USB/RDP). Set `Export.RunOnStartup: true` to verify it without
+waiting for the scheduled time.
+
+**Cloud upload (pluggable).** After exporting, any not-yet-uploaded files are sent via the
+configured `ICloudUploadProvider`. Upload runs entirely off the logging hot path: failures are
+retried on the next cycle and never slow down or block recording.
+
+- **`None`** (default) — does nothing and is a fully supported permanent state for offline sites.
+- **`GoogleDrive`** — uploads to a Drive folder. Authentication uses OAuth with the refresh token
+  cached encrypted at rest via Windows DPAPI. The unattended service only refreshes a previously
+  stored token; the one-time interactive consent is performed during setup.
+
+  > **Status:** the Google Drive provider is implemented but **not yet end-to-end tested** — it
+  > needs a Google Cloud OAuth client (`google_client.json`) and a completed consent. The
+  > interactive consent flow will be driven from the local web UI (Phase 4). Until then the
+  > default `None` provider is recommended.
+
+**Retention.** A periodic sweep (`Storage.RetentionCheckIntervalMinutes`) prunes readings older
+than `Storage.RetentionDays`, in one of two modes:
+
+- **Upload enabled** (a real provider) — only prune old readings that have been _confirmed
+  uploaded_; un-uploaded data is never dropped.
+- **Upload disabled** (`None`) — prune purely by age. Very old data at offline sites is then only
+  retrievable directly from the machine.
+
 ## Project layout
 
 ```text
 Configuration/   Strongly-typed options bound from appsettings.json
 OpcUa/           OPC UA application config, per-PLC session, discovery + tag filter, manager
-Storage/         SQLite database, schema, in-memory buffer, batched writer
+Storage/         SQLite database, in-memory buffer, batched writer, CSV export, retention
+Upload/          Pluggable cloud upload abstraction (None + Google Drive, DPAPI token store)
+Export/          Scheduled export + upload orchestration
 Program.cs       Generic Host wiring (Serilog + Windows Service + hosted services)
 scripts/         Windows Service install / uninstall (PowerShell)
 ```
 
 Built on the OPC Foundation reference stack (`OPCFoundation.NetStandard.Opc.Ua.Client`),
-`Microsoft.Data.Sqlite`, and `Serilog`.
+`Microsoft.Data.Sqlite`, `Google.Apis.Drive.v3`, and `Serilog`.
 
 ## Roadmap
 
@@ -189,6 +248,6 @@ Built on the OPC Foundation reference stack (`OPCFoundation.NetStandard.Opc.Ua.C
 | --- | --- | --- |
 | 1 | Core logging: OPC UA discovery/subscription → SQLite | ✅ Done |
 | 2 | Multi-PLC + Windows Service hosting with auto-restart recovery | ✅ Done |
-| 3 | CSV export + pluggable cloud upload (Google Drive first), retention/pruning | Planned |
+| 3 | CSV export + pluggable cloud upload (Google Drive), retention/pruning | ✅ Done |
 | 4 | Local web UI (status + configuration, incl. network scan for setup) | Planned |
 | 5 | Multi-site hardening: config validation, packaging/install, field docs | Planned |

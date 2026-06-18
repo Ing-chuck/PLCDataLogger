@@ -1,6 +1,10 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using PlcDataLogger.Configuration;
+using PlcDataLogger.Export;
 using PlcDataLogger.OpcUa;
 using PlcDataLogger.Storage;
+using PlcDataLogger.Upload;
 using Serilog;
 
 // A Windows Service starts with its working directory set to System32, not the folder the
@@ -36,9 +40,24 @@ try
 
     builder.Services.AddSingleton<ReadingBuffer>();
     builder.Services.AddSingleton<LoggerDatabase>();
+    builder.Services.AddSingleton<CsvExporter>();
+
+    // Cloud upload provider, selected by configuration. "None" is the default and a fully
+    // supported permanent state for offline sites (§9).
+    builder.Services.AddSingleton<ICloudUploadProvider>(sp =>
+    {
+        var options = sp.GetRequiredService<IOptions<LoggerOptions>>().Value.Upload;
+        return options.Provider.Equals("GoogleDrive", StringComparison.OrdinalIgnoreCase)
+            ? new GoogleDriveUploadProvider(
+                options.GoogleDrive,
+                sp.GetRequiredService<ILogger<GoogleDriveUploadProvider>>())
+            : new NoneUploadProvider();
+    });
 
     builder.Services.AddHostedService<StorageWriter>();
     builder.Services.AddHostedService<OpcUaClientManager>();
+    builder.Services.AddHostedService<ExportUploadService>();
+    builder.Services.AddHostedService<RetentionService>();
 
     var host = builder.Build();
     host.Run();

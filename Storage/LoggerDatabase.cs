@@ -9,6 +9,9 @@ namespace PlcDataLogger.Storage;
 /// </summary>
 public sealed record DiscoveredTag(string NodeId, string Name);
 
+/// <summary>An export file awaiting (or retrying) upload.</summary>
+public sealed record PendingUpload(long UploadLogId, string FileName, string FilePath, long MaxReadingId);
+
 /// <summary>
 /// Owns the local SQLite store — the source of truth (§6). Uses WAL mode for crash
 /// safety. A single connection is kept open for the process lifetime; all access is
@@ -20,17 +23,22 @@ public sealed class LoggerDatabase : IDisposable
     private readonly object _gate = new();
     private readonly string _databasePath;
     private SqliteConnection? _connection;
+    private string? _fullPath;
 
     public LoggerDatabase(IOptions<LoggerOptions> options)
     {
         _databasePath = options.Value.DatabasePath;
     }
 
+    /// <summary>Absolute path to the database file (valid after <see cref="Initialize"/>).</summary>
+    public string FullPath => _fullPath ?? throw new InvalidOperationException("Database not initialized.");
+
     public void Initialize()
     {
         lock (_gate)
         {
             var fullPath = Path.GetFullPath(_databasePath);
+            _fullPath = fullPath;
             var dir = Path.GetDirectoryName(fullPath);
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
@@ -179,6 +187,115 @@ public sealed class LoggerDatabase : IDisposable
         }
     }
 
+    /// <summary>Open a separate read-only connection. WAL mode allows this to run
+    /// concurrently with the writer, so large CSV exports never block ingestion.</summary>
+    public SqliteConnection OpenReadOnlyConnection()
+    {
+        var conn = new SqliteConnection($"Data Source={FullPath};Mode=ReadOnly");
+        conn.Open();
+        return conn;
+    }
+
+    /// <summary>Highest reading id that has been written to any export file.</summary>
+    public long GetMaxExportedReadingId() => ScalarLong("SELECT MAX(max_reading_id) FROM upload_log;");
+
+    /// <summary>Highest reading id confirmed uploaded — the watermark below which
+    /// upload-gated pruning is allowed (§8).</summary>
+    public long GetMaxUploadedReadingId() =>
+        ScalarLong("SELECT MAX(max_reading_id) FROM upload_log WHERE status = 'Uploaded';");
+
+    /// <summary>Record a freshly written export file (status 'Exported'), returning its id.</summary>
+    public long RecordExport(string fileName, string filePath, string? periodStart, string? periodEnd,
+        long maxReadingId, int rowCount)
+    {
+        lock (_gate)
+        {
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO upload_log
+                    (file_name, file_path, period_start, period_end, max_reading_id, row_count, exported_at, status)
+                VALUES ($name, $path, $ps, $pe, $maxId, $rows, $now, 'Exported')
+                RETURNING id;
+                """;
+            cmd.Parameters.AddWithValue("$name", fileName);
+            cmd.Parameters.AddWithValue("$path", filePath);
+            cmd.Parameters.AddWithValue("$ps", (object?)periodStart ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$pe", (object?)periodEnd ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$maxId", maxReadingId);
+            cmd.Parameters.AddWithValue("$rows", rowCount);
+            cmd.Parameters.AddWithValue("$now", IsoNow());
+            return Convert.ToInt64(cmd.ExecuteScalar());
+        }
+    }
+
+    /// <summary>Export files not yet uploaded (status != 'Uploaded'), oldest first.</summary>
+    public List<PendingUpload> GetPendingUploads()
+    {
+        lock (_gate)
+        {
+            var list = new List<PendingUpload>();
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT id, file_name, file_path, max_reading_id FROM upload_log WHERE status <> 'Uploaded' ORDER BY id;";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                list.Add(new PendingUpload(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3)));
+            return list;
+        }
+    }
+
+    public void MarkUploaded(long uploadLogId)
+    {
+        lock (_gate)
+        {
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = "UPDATE upload_log SET status = 'Uploaded', uploaded_at = $now WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$now", IsoNow());
+            cmd.Parameters.AddWithValue("$id", uploadLogId);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    public void MarkUploadFailed(long uploadLogId)
+    {
+        lock (_gate)
+        {
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = "UPDATE upload_log SET status = 'UploadFailed' WHERE id = $id AND status <> 'Uploaded';";
+            cmd.Parameters.AddWithValue("$id", uploadLogId);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>Delete readings older than <paramref name="cutoffUtc"/>. When
+    /// <paramref name="maxReadingIdInclusive"/> is non-null, only readings at or below that
+    /// id are pruned (upload-confirmed watermark). Returns the number of rows deleted.</summary>
+    public int PruneReadings(DateTime cutoffUtc, long? maxReadingIdInclusive)
+    {
+        lock (_gate)
+        {
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = maxReadingIdInclusive is null
+                ? "DELETE FROM readings WHERE ts_utc < $cutoff;"
+                : "DELETE FROM readings WHERE ts_utc < $cutoff AND id <= $maxId;";
+            cmd.Parameters.AddWithValue("$cutoff", Iso(cutoffUtc));
+            if (maxReadingIdInclusive is not null)
+                cmd.Parameters.AddWithValue("$maxId", maxReadingIdInclusive.Value);
+            return cmd.ExecuteNonQuery();
+        }
+    }
+
+    private long ScalarLong(string sql)
+    {
+        lock (_gate)
+        {
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = sql;
+            var result = cmd.ExecuteScalar();
+            return result is null or DBNull ? 0L : Convert.ToInt64(result);
+        }
+    }
+
     private SqliteConnection Conn =>
         _connection ?? throw new InvalidOperationException("Database not initialized.");
 
@@ -236,10 +353,16 @@ public sealed class LoggerDatabase : IDisposable
         CREATE INDEX IF NOT EXISTS idx_readings_tag_ts ON readings(tag_id, ts_utc);
 
         CREATE TABLE IF NOT EXISTS upload_log (
-            id          INTEGER PRIMARY KEY,
-            file_name   TEXT NOT NULL,
-            uploaded_at TEXT,
-            status      TEXT NOT NULL
+            id             INTEGER PRIMARY KEY,
+            file_name      TEXT NOT NULL,
+            file_path      TEXT NOT NULL,
+            period_start   TEXT,
+            period_end     TEXT,
+            max_reading_id INTEGER NOT NULL,
+            row_count      INTEGER NOT NULL,
+            exported_at    TEXT NOT NULL,
+            uploaded_at    TEXT,
+            status         TEXT NOT NULL        -- Exported | Uploaded | UploadFailed
         );
 
         CREATE TABLE IF NOT EXISTS settings (

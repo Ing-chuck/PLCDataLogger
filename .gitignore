@@ -11,6 +11,11 @@ pki/
 *.db-wal
 run.out
 
+# CSV exports and cloud-upload secrets/tokens
+exports/
+google_token/
+google_client.json
+
 # User-specific files
 *.rsuser
 *.suo

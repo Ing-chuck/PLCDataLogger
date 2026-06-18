@@ -19,6 +19,55 @@ public sealed class LoggerOptions
     public SubscriptionOptions Subscription { get; set; } = new();
 
     public List<PlcOptions> Plcs { get; set; } = new();
+
+    public StorageOptions Storage { get; set; } = new();
+
+    public ExportOptions Export { get; set; } = new();
+
+    public UploadOptions Upload { get; set; } = new();
+}
+
+public sealed class StorageOptions
+{
+    /// <summary>Readings older than this are eligible for pruning (§8). When upload is
+    /// enabled, a reading is only pruned once it has been confirmed uploaded.</summary>
+    public int RetentionDays { get; set; } = 90;
+
+    /// <summary>How often the retention sweep runs.</summary>
+    public int RetentionCheckIntervalMinutes { get; set; } = 60;
+}
+
+public sealed class ExportOptions
+{
+    /// <summary>Folder (relative to the executable) where CSV exports are written.</summary>
+    public string DirectoryPath { get; set; } = "exports";
+
+    /// <summary>Local time of day to run the daily export, "HH:mm".</summary>
+    public string DailyAtLocalTime { get; set; } = "02:00";
+
+    /// <summary>Run one export shortly after startup (handy for dev/verification).</summary>
+    public bool RunOnStartup { get; set; } = false;
+}
+
+public sealed class UploadOptions
+{
+    /// <summary>"None" (default, fully supported permanent state for offline sites) or
+    /// "GoogleDrive".</summary>
+    public string Provider { get; set; } = "None";
+
+    /// <summary>Destination folder/path within the provider.</summary>
+    public string DestinationFolder { get; set; } = "PLCDataLogger";
+
+    public GoogleDriveOptions GoogleDrive { get; set; } = new();
+}
+
+public sealed class GoogleDriveOptions
+{
+    /// <summary>Path to the OAuth client secrets JSON (downloaded from Google Cloud).</summary>
+    public string CredentialsPath { get; set; } = "google_client.json";
+
+    /// <summary>Directory where the DPAPI-encrypted OAuth token is cached.</summary>
+    public string TokenStorePath { get; set; } = "google_token";
 }
 
 public sealed class DiscoveryOptions
