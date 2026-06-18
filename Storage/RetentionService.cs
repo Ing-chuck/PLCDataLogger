@@ -17,33 +17,32 @@ public sealed class RetentionService : BackgroundService
 {
     private readonly LoggerOptions _options;
     private readonly LoggerDatabase _db;
-    private readonly ICloudUploadProvider _provider;
+    private readonly UploadProviderResolver _providers;
     private readonly ILogger<RetentionService> _log;
 
     public RetentionService(
         IOptions<LoggerOptions> options,
         LoggerDatabase db,
-        ICloudUploadProvider provider,
+        UploadProviderResolver providers,
         ILogger<RetentionService> log)
     {
         _options = options.Value;
         _db = db;
-        _provider = provider;
+        _providers = providers;
         _log = log;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var interval = TimeSpan.FromMinutes(Math.Max(1, _options.Storage.RetentionCheckIntervalMinutes));
-        var uploadEnabled = _provider.ProviderName != "None";
-        _log.LogInformation("Retention service started (keep {Days} days, mode: {Mode}).",
-            _options.Storage.RetentionDays, uploadEnabled ? "upload-gated" : "age-only");
+        _log.LogInformation("Retention service started (keep {Days} days).", _options.Storage.RetentionDays);
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                Sweep(uploadEnabled);
+                // Recompute the mode each sweep — the upload provider can change at runtime.
+                Sweep(_providers.Current.ProviderName != "None");
                 await Task.Delay(interval, stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { break; }

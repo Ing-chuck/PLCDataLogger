@@ -1,0 +1,22 @@
+@inherits LayoutComponentBase
+
+<nav class="nav">
+    <span class="brand">PLC Data Logger</span>
+    <NavLink href="" Match="NavLinkMatch.All">Dashboard</NavLink>
+    <NavLink href="plcs">PLCs</NavLink>
+    <NavLink href="scan">Scan</NavLink>
+    <NavLink href="upload">Upload</NavLink>
+</nav>
+
+<main class="wrap">
+    @Body
+</main>
+
+<style>
+    .nav { display: flex; align-items: center; gap: 18px; padding: 12px 24px;
+           background: #14171d; border-bottom: 1px solid #2a2f3a; }
+    .nav .brand { font-weight: 700; margin-right: 8px; }
+    .nav a { color: #9aa0a6; text-decoration: none; font-size: .92rem; }
+    .nav a:hover { color: #e6e6e6; }
+    .nav a.active { color: #5fd38a; }
+</style>

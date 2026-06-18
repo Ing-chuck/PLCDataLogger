@@ -32,12 +32,14 @@ currently built and how to run it.
 - Exports readings to **CSV** on a daily schedule and optionally uploads them via a pluggable
   cloud provider, then prunes old data under a retention policy — see
   [Export, upload & retention](#export-upload--retention).
-- Serves a **localhost-only status dashboard** plus a `/api/health` JSON endpoint showing
-  per-PLC connection state, last sample/write/export/upload, buffer depth, and free disk — see
-  [Status dashboard & health](#status-dashboard--health).
+- Serves a **localhost-only web UI** (status dashboard + configuration) plus JSON endpoints. The
+  config pages edit PLC connections and upload settings **live, without a restart**, and a
+  **network scan** discovers OPC UA servers on the LAN for setup — see
+  [Web UI](#web-ui) and [Status dashboard & health](#status-dashboard--health).
 
-Not yet built: the **configuration** side of the web UI — editing PLC connections, the Google
-OAuth consent flow, and network scan for setup — see [Roadmap](#roadmap).
+Google Drive upload (incl. the OAuth consent flow) has been validated end-to-end. Not yet
+end-to-end tested: certificate-trust acceptance for secured OPC UA policies (needs a secured
+endpoint). Remaining work: multi-site hardening (Phase 5) — see [Roadmap](#roadmap).
 
 ## Requirements
 
@@ -221,10 +223,11 @@ retried on the next cycle and never slow down or block recording.
   cached encrypted at rest via Windows DPAPI. The unattended service only refreshes a previously
   stored token; the one-time interactive consent is performed during setup.
 
-  > **Status:** the Google Drive provider is implemented but **not yet end-to-end tested** — it
-  > needs a Google Cloud OAuth client (`google_client.json`) and a completed consent. The
-  > interactive consent flow will be driven from the local web UI (Phase 4). Until then the
-  > default `None` provider is recommended.
+  > **Setup:** create an OAuth client (**Desktop app** type) in Google Cloud, enable the Drive
+  > API, and **publish** the consent screen so the refresh token doesn't expire. Save the client
+  > JSON, point the **Upload** page at it, then click **Connect Google…** once (opens a browser).
+  > Because consent needs a browser, do it while running interactively — a LocalSystem service has
+  > no desktop; the DPAPI (LocalMachine) token it stores is then readable by the service.
 
 **Retention.** A periodic sweep (`Storage.RetentionCheckIntervalMinutes`) prunes readings older
 than `Storage.RetentionDays`, in one of two modes:
@@ -234,44 +237,57 @@ than `Storage.RetentionDays`, in one of two modes:
 - **Upload disabled** (`None`) — prune purely by age. Very old data at offline sites is then only
   retrievable directly from the machine.
 
+## Web UI
+
+The logger hosts a small **Blazor Server** site, bound to **localhost only** (`WebUi.Port`,
+default `5198`) — a convenience for whoever is physically at the machine, not a remotely accessible
+service (§11). Browse to `http://localhost:5198/`.
+
+| Page | Purpose |
+| --- | --- |
+| **Dashboard** | Live status, plus an **Export & upload now** button to run the export/upload pass on demand. |
+| **PLCs** | Add / edit / remove PLC connections. Changes apply **live** — sessions are added, removed, or reconnected without a service restart (§5). |
+| **Scan** | Discover OPC UA servers on the local subnet (TCP 4840 sweep + FindServers enrichment) and add one as a PLC with one click. |
+| **Upload** | Choose the cloud provider, edit its settings (with a **Browse…** server-side file/folder picker for the credentials/token paths), test the connection, and run the Google OAuth consent. |
+
+Editable configuration (PLC connections and upload settings) is stored in `config.local.json`
+next to the executable — seeded from `appsettings.json` on first run, then owned by the UI.
+
+The same operations are available as localhost JSON endpoints for scripted provisioning:
+
+```text
+GET    /api/health           overall health snapshot
+GET    /api/scan             discover OPC UA servers on the LAN
+GET    /api/plcs             list configured PLCs
+POST   /api/plcs             add/replace a PLC  { name, endpointUrl, securityPolicy }
+DELETE /api/plcs/{name}      remove a PLC
+POST   /api/export-now       run an export + upload pass immediately
+```
+
+> Google Drive upload and its OAuth consent flow are validated end-to-end. Certificate-trust
+> acceptance for secured OPC UA policies is wired in but **not yet end-to-end tested** (needs a
+> secured endpoint).
+
 ## Status dashboard & health
 
-The logger hosts a small **Blazor Server** status page, bound to **localhost only** (`WebUi.Port`,
-default `5198`) — it's a convenience for whoever is physically at the machine, not a remotely
-accessible service (§11). Browse to:
-
-```text
-http://localhost:5198/
-```
-
-It shows, refreshing live: per-PLC connection state, discovered/monitored tag counts, last sample
-time, total readings written, buffer depth, the active upload provider, last export/upload times,
-and free disk space.
-
-The same data is available as JSON for monitoring or scripting:
-
-```text
-GET http://localhost:5198/api/health
-```
+The **Dashboard** page shows, refreshing live: per-PLC connection state, discovered/monitored tag
+counts, last sample time, total readings written, buffer depth, the active upload provider, last
+export/upload times, and free disk space. The same data is at `GET /api/health`.
 
 The health view distinguishes "upload not configured" (neutral — expected for offline sites) from a
 configured provider, so a genuinely failing upload stands out (§9).
 
-> The web UI is currently **status only**. Editing PLC connections, the Google OAuth consent flow,
-> certificate-trust acceptance, and network scan for setup are the next increment — see
-> [Roadmap](#roadmap).
-
 ## Project layout
 
 ```text
-Configuration/   Strongly-typed options bound from appsettings.json
-OpcUa/           OPC UA application config, per-PLC session, discovery + tag filter, manager
+Configuration/   Options, runtime-editable ConfigStore (config.local.json)
+OpcUa/           OPC UA app config, per-PLC session, discovery + tag filter, manager, network scanner
 Storage/         SQLite database, in-memory buffer, batched writer, CSV export, retention
-Upload/          Pluggable cloud upload abstraction (None + Google Drive, DPAPI token store)
+Upload/          Pluggable cloud upload (None + Google Drive, DPAPI token store, provider resolver)
 Export/          Scheduled export + upload orchestration
 Health/          Runtime health collector surfaced to the web UI
-Components/      Blazor Server status dashboard (App, Routes, Pages/Dashboard)
-Program.cs       Web host wiring (Serilog + Windows Service + hosted services + Blazor)
+Components/      Blazor Server UI (layout/nav, Dashboard, PLCs, Scan, Upload)
+Program.cs       Web host wiring (Serilog + Windows Service + hosted services + Blazor + APIs)
 scripts/         Windows Service install / uninstall (PowerShell)
 ```
 
@@ -286,5 +302,6 @@ Built on the OPC Foundation reference stack (`OPCFoundation.NetStandard.Opc.Ua.C
 | 2 | Multi-PLC + Windows Service hosting with auto-restart recovery | ✅ Done |
 | 3 | CSV export + pluggable cloud upload (Google Drive), retention/pruning | ✅ Done |
 | 4a | Observability: localhost status dashboard + `/api/health`, health monitor | ✅ Done |
-| 4b | Config UI: edit PLCs, Google OAuth consent, cert trust, network scan | Planned |
+| 4b | Config UI: edit PLCs (live hot-reload), network scan, upload settings + JSON APIs | ✅ Done |
+| 4b* | Google Drive upload + OAuth consent (validated); cert-trust acceptance still untested | Mostly done |
 | 5 | Multi-site hardening: config validation, packaging/install, field docs | Planned |

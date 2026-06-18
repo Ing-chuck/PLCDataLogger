@@ -45,7 +45,7 @@ public sealed class HealthMonitor
     private readonly LoggerOptions _options;
     private readonly ReadingBuffer _buffer;
     private readonly LoggerDatabase _db;
-    private readonly ICloudUploadProvider _provider;
+    private readonly UploadProviderResolver _providers;
 
     private long _readingsWritten;
     private DateTime? _lastWriteUtc;
@@ -54,12 +54,12 @@ public sealed class HealthMonitor
         IOptions<LoggerOptions> options,
         ReadingBuffer buffer,
         LoggerDatabase db,
-        ICloudUploadProvider provider)
+        UploadProviderResolver providers)
     {
         _options = options.Value;
         _buffer = buffer;
         _db = db;
-        _provider = provider;
+        _providers = providers;
     }
 
     public void SetConnected(string plc, string endpointUrl)
@@ -87,6 +87,9 @@ public sealed class HealthMonitor
 
     public void MarkSample(string plc) => Get(plc).LastSampleUtc = DateTime.UtcNow;
 
+    /// <summary>Drop a PLC from the health view (e.g. it was removed from configuration).</summary>
+    public void RemovePlc(string plc) => _plcs.TryRemove(plc, out _);
+
     public void AddWritten(int count)
     {
         Interlocked.Add(ref _readingsWritten, count);
@@ -113,7 +116,7 @@ public sealed class HealthMonitor
             ReadingsWritten = written,
             LastWriteUtc = _lastWriteUtc,
             BufferDepth = depth,
-            UploadProvider = _provider.ProviderName,
+            UploadProvider = _providers.Current.ProviderName,
             LastExportUtc = lastExport,
             LastUploadUtc = lastUpload,
             FreeDiskMb = FreeDiskMb(),

@@ -1,17 +1,31 @@
 @page "/"
+@using PlcDataLogger.Export
 @inject HealthMonitor Health
+@inject ExportRunner Runner
 @implements IDisposable
 
-<div class="wrap">
-    @if (_s is null)
-    {
+@if (_s is null)
+{
         <h1>PLC Data Logger</h1>
         <p class="sub">Starting…</p>
     }
     else
     {
-        <h1>PLC Data Logger — @_s.SiteName</h1>
-        <p class="sub">Live status · updated @Local(_s.GeneratedUtc).ToString("HH:mm:ss")</p>
+        <div class="head-row">
+            <div>
+                <h1>PLC Data Logger — @_s.SiteName</h1>
+                <p class="sub">Live status · updated @Local(_s.GeneratedUtc).ToString("HH:mm:ss")</p>
+            </div>
+            <div class="head-actions">
+                <button class="btn primary" @onclick="ExportNow" disabled="@_running">
+                    @(_running ? "Working…" : "Export & upload now")
+                </button>
+                @if (_runMessage is not null)
+                {
+                    <span class="sub run-msg">@_runMessage</span>
+                }
+            </div>
+        </div>
 
         <div class="cards">
             <div class="card">
@@ -85,12 +99,13 @@
                 }
             </tbody>
         </table>
-    }
-</div>
+}
 
 @code {
     private HealthSnapshot? _s;
     private Timer? _timer;
+    private bool _running;
+    private string? _runMessage;
 
     protected override void OnInitialized()
     {
@@ -100,6 +115,26 @@
             _s = Health.Snapshot();
             StateHasChanged();
         }), null, 2000, 2000);
+    }
+
+    private async Task ExportNow()
+    {
+        _running = true;
+        _runMessage = null;
+        try
+        {
+            var result = await Runner.RunOnceAsync();
+            _runMessage = result.Message;
+        }
+        catch (Exception ex)
+        {
+            _runMessage = "Failed: " + ex.Message;
+        }
+        finally
+        {
+            _running = false;
+            _s = Health.Snapshot();
+        }
     }
 
     private static DateTime Local(DateTime utc) => utc.ToLocalTime();

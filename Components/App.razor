@@ -11,6 +11,9 @@
         .wrap { max-width: 1000px; margin: 0 auto; padding: 24px; }
         h1 { font-size: 1.4rem; margin: 0 0 4px; }
         .sub { color: #9aa0a6; margin: 0 0 20px; font-size: .9rem; }
+        .head-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+        .head-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+        .head-actions .run-msg { margin: 0; }
         .cards { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }
         .card { background: #1a1d24; border: 1px solid #2a2f3a; border-radius: 8px; padding: 12px 16px; min-width: 150px; }
         .card .label { color: #9aa0a6; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
@@ -23,6 +26,38 @@
         .bad { background: #4a1d1d; color: #ff8a8a; }
         .muted { color: #9aa0a6; }
         .warn { color: #ffcc66; }
+        .small { font-size: .82rem; }
+        h2.h2, .h2 { font-size: 1.05rem; margin: 22px 0 10px; }
+        .form { background: #1a1d24; border: 1px solid #2a2f3a; border-radius: 8px; padding: 16px; max-width: 560px; }
+        .form label { display: block; margin-bottom: 12px; font-size: .82rem; color: #9aa0a6; }
+        .form input, .form select { display: block; width: 100%; margin-top: 4px; padding: 8px 10px; box-sizing: border-box;
+            background: #0f1115; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px; font-size: .9rem; }
+        .actions { display: flex; gap: 8px; margin-top: 8px; }
+        .btn { background: #232833; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 6px;
+            padding: 6px 12px; font-size: .85rem; cursor: pointer; }
+        .btn:hover { background: #2c323e; }
+        .btn:disabled { opacity: .5; cursor: default; }
+        .btn.primary { background: #1f6f43; border-color: #1f6f43; }
+        .btn.primary:hover { background: #248050; }
+        .btn.danger { background: #5a2330; border-color: #5a2330; }
+        .err { color: #ff8a8a; }
+        .ok-msg { color: #5fd38a; }
+        .picker { display: flex; gap: 8px; margin: 4px 0 12px; }
+        .picker input { flex: 1; padding: 8px 10px; background: #0f1115; color: #e6e6e6;
+            border: 1px solid #2a2f3a; border-radius: 6px; font-size: .9rem; }
+        .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.6);
+            display: flex; align-items: center; justify-content: center; z-index: 50; }
+        .modal { background: #1a1d24; border: 1px solid #2a2f3a; border-radius: 10px;
+            width: 560px; max-width: 92vw; max-height: 80vh; display: flex; flex-direction: column; padding: 16px; }
+        .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .drives { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+        .modal-path { font-family: ui-monospace, monospace; font-size: .82rem; color: #9aa0a6;
+            background: #0f1115; border: 1px solid #2a2f3a; border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; word-break: break-all; }
+        .fs { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1; border: 1px solid #2a2f3a; border-radius: 6px; }
+        .fs li { padding: 7px 10px; cursor: pointer; font-size: .88rem; border-bottom: 1px solid #20242d; }
+        .fs li:hover { background: #232833; }
+        .fs li.file { color: #cfd3da; }
+        .modal-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
     </style>
     <HeadOutlet />
 </head>

@@ -1,0 +1,121 @@
+@page "/upload"
+@using PlcDataLogger.Configuration
+@using PlcDataLogger.Upload
+@inject ConfigStore Store
+@inject UploadProviderResolver Providers
+
+<h1>Cloud Upload</h1>
+<p class="sub">Exports are uploaded after each run. "None" is fully supported for offline sites.</p>
+
+<div class="form">
+    <label>Provider
+        <select @bind="_form.Provider">
+            <option value="None">None</option>
+            <option value="GoogleDrive">Google Drive</option>
+        </select>
+    </label>
+    <label>Destination folder
+        <input @bind="_form.DestinationFolder" placeholder="PLCDataLogger" />
+    </label>
+
+    @if (_form.Provider == "GoogleDrive")
+    {
+        <label>OAuth client secrets (file)</label>
+        <PathPicker Value="@_form.GoogleDrive.CredentialsPath"
+                    ValueChanged="@(v => _form.GoogleDrive.CredentialsPath = v)"
+                    Directory="false" Placeholder="secrets/google_client.json" />
+
+        <label>Token store (folder)</label>
+        <PathPicker Value="@_form.GoogleDrive.TokenStorePath"
+                    ValueChanged="@(v => _form.GoogleDrive.TokenStorePath = v)"
+                    Directory="true" Placeholder="google_token" />
+    }
+
+    <div class="actions">
+        <button class="btn primary" @onclick="Save">Save</button>
+        <button class="btn" @onclick="TestConnection" disabled="@_busy">Test connection</button>
+        @if (_form.Provider == "GoogleDrive")
+        {
+            <button class="btn" @onclick="Authorize" disabled="@_busy">Connect Google…</button>
+        }
+    </div>
+
+    @if (_message is not null)
+    {
+        <p class="@(_ok ? "ok-msg" : "err")">@_message</p>
+    }
+    @if (_form.Provider == "GoogleDrive")
+    {
+        <p class="muted small">
+            Connecting opens a browser on this machine to grant access; the refresh token is then
+            stored encrypted (DPAPI). This must be done once during setup.
+        </p>
+    }
+</div>
+
+@code {
+    private UploadOptions _form = new();
+    private bool _busy;
+    private bool _ok;
+    private string? _message;
+
+    protected override void OnInitialized() => _form = Store.GetUpload();
+
+    private void Save()
+    {
+        Store.SetUpload(_form);
+        _ok = true;
+        _message = "Saved. Provider is now: " + Providers.Current.ProviderName + ".";
+    }
+
+    private async Task TestConnection()
+    {
+        _busy = true;
+        _message = null;
+        try
+        {
+            var provider = Providers.Current;
+            if (!await provider.IsConfiguredAsync())
+            {
+                _ok = false;
+                _message = $"Provider '{provider.ProviderName}' is not configured.";
+                return;
+            }
+            _ok = await provider.TestConnectionAsync();
+            _message = _ok ? "Connection OK." : "Connection failed.";
+        }
+        catch (Exception ex)
+        {
+            _ok = false;
+            _message = "Error: " + ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task Authorize()
+    {
+        _busy = true;
+        _message = null;
+        try
+        {
+            Store.SetUpload(_form); // ensure paths are current before authorizing
+            if (Providers.Current is GoogleDriveUploadProvider drive)
+            {
+                await drive.AuthorizeInteractiveAsync();
+                _ok = true;
+                _message = "Google Drive authorized.";
+            }
+            else
+            {
+                _ok = false;
+                _message = "Select and save the Google Drive provider first.";
+            }
+        }
+        catch (Exception ex)
+        {
+            _ok = false;
+            _message = "Authorization failed: " + ex.Message;
+        }
+        finally { _busy = false; }
+    }
+}

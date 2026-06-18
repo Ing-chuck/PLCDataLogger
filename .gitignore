@@ -16,6 +16,11 @@ exports/
 google_token/
 google_client.json
 
+[Ss]ecrets
+
+# Runtime-editable configuration (per-site; written by the web UI)
+config.local.json
+
 # User-specific files
 *.rsuser
 *.suo

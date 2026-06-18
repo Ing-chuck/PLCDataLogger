@@ -1,0 +1,156 @@
+@namespace PlcDataLogger.Components.Shared
+
+<div class="picker">
+    <input value="@Value" @oninput="OnInput" placeholder="@Placeholder" />
+    <button class="btn" type="button" @onclick="Open">Browse…</button>
+</div>
+
+@if (_open)
+{
+    <div class="modal-backdrop" @onclick="Cancel">
+        <div class="modal" @onclick:stopPropagation="true">
+            <div class="modal-head">
+                <strong>@(Directory ? "Select a folder" : "Select a file")</strong>
+                <button class="btn" type="button" @onclick="Cancel">✕</button>
+            </div>
+
+            <div class="drives">
+                @foreach (var d in _drives)
+                {
+                    <button class="btn" type="button" @onclick="() => Load(d)">@d</button>
+                }
+            </div>
+
+            <div class="modal-path">@_current</div>
+            @if (_error is not null)
+            {
+                <div class="err small">@_error</div>
+            }
+
+            <ul class="fs">
+                @if (_canGoUp)
+                {
+                    <li class="dir" @onclick="GoUp">📁 ..</li>
+                }
+                @foreach (var dir in _dirs)
+                {
+                    <li class="dir" @onclick="() => Load(dir.Path)">📁 @dir.Name</li>
+                }
+                @if (!Directory)
+                {
+                    @foreach (var file in _files)
+                    {
+                        <li class="file" @onclick="() => PickFile(file.Path)">📄 @file.Name</li>
+                    }
+                }
+            </ul>
+
+            <div class="modal-foot">
+                @if (Directory)
+                {
+                    <button class="btn primary" type="button" @onclick="PickCurrentDir"
+                            disabled="@string.IsNullOrEmpty(_current)">Select this folder</button>
+                }
+                <button class="btn" type="button" @onclick="Cancel">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public string? Value { get; set; }
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+    [Parameter] public bool Directory { get; set; }
+    [Parameter] public string? Placeholder { get; set; }
+
+    private bool _open;
+    private string _current = "";
+    private bool _canGoUp;
+    private string? _error;
+    private List<Entry> _dirs = new();
+    private List<Entry> _files = new();
+    private List<string> _drives = new();
+
+    private sealed record Entry(string Name, string Path);
+
+    private Task OnInput(ChangeEventArgs e) => ValueChanged.InvokeAsync(e.Value?.ToString() ?? "");
+
+    private void Open()
+    {
+        _drives = SafeDrives();
+        Load(ResolveStart(Value));
+        _open = true;
+    }
+
+    private void Cancel() => _open = false;
+
+    private void GoUp()
+    {
+        var parent = System.IO.Directory.GetParent(_current);
+        if (parent is not null) Load(parent.FullName);
+    }
+
+    private void Load(string path)
+    {
+        _error = null;
+        try
+        {
+            _current = path;
+            _canGoUp = System.IO.Directory.GetParent(path) is not null;
+            _dirs = System.IO.Directory.GetDirectories(path)
+                .Select(p => new Entry(System.IO.Path.GetFileName(p.TrimEnd('\\', '/')), p))
+                .OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            _files = Directory
+                ? new()
+                : System.IO.Directory.GetFiles(path)
+                    .Select(p => new Entry(System.IO.Path.GetFileName(p), p))
+                    .OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task PickFile(string path)
+    {
+        await ValueChanged.InvokeAsync(path);
+        _open = false;
+    }
+
+    private async Task PickCurrentDir()
+    {
+        await ValueChanged.InvokeAsync(_current);
+        _open = false;
+    }
+
+    private static string ResolveStart(string? value)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                var full = System.IO.Path.GetFullPath(value);
+                if (System.IO.Directory.Exists(full)) return full;
+                var dir = System.IO.Path.GetDirectoryName(full);
+                if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir)) return dir;
+            }
+        }
+        catch { /* fall through */ }
+        return System.IO.Directory.GetCurrentDirectory();
+    }
+
+    private static List<string> SafeDrives()
+    {
+        try
+        {
+            return DriveInfo.GetDrives()
+                .Where(d => d.IsReady)
+                .Select(d => d.RootDirectory.FullName)
+                .ToList();
+        }
+        catch { return new(); }
+    }
+}

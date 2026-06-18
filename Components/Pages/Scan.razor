@@ -1,0 +1,91 @@
+@page "/scan"
+@using PlcDataLogger.Configuration
+@using PlcDataLogger.OpcUa
+@inject OpcUaNetworkScanner Scanner
+@inject ConfigStore Store
+@inject NavigationManager Nav
+
+<h1>Scan Network</h1>
+<p class="sub">Probes this machine's local subnet(s) for OPC UA servers (TCP port 4840) to ease setup.</p>
+
+<div class="actions">
+    <button class="btn primary" @onclick="RunScan" disabled="@_scanning">
+        @(_scanning ? "Scanning…" : "Scan network")
+    </button>
+</div>
+
+@if (_results is not null)
+{
+    <table>
+        <thead>
+            <tr><th>Endpoint</th><th>Application</th><th></th></tr>
+        </thead>
+        <tbody>
+            @if (_results.Count == 0)
+            {
+                <tr><td colspan="3" class="muted">No OPC UA servers found on the local subnet.</td></tr>
+            }
+            @foreach (var server in _results)
+            {
+                <tr>
+                    <td>@server.EndpointUrl</td>
+                    <td class="muted">@(server.ApplicationName ?? "—")</td>
+                    <td>
+                        @if (IsConfigured(server.EndpointUrl))
+                        {
+                            <span class="muted">Added</span>
+                        }
+                        else
+                        {
+                            <button class="btn" @onclick="() => Add(server)">Add as PLC</button>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private IReadOnlyList<DiscoveredServer>? _results;
+    private bool _scanning;
+
+    private async Task RunScan()
+    {
+        _scanning = true;
+        _results = null;
+        try
+        {
+            _results = await Scanner.ScanAsync();
+        }
+        finally
+        {
+            _scanning = false;
+        }
+    }
+
+    private bool IsConfigured(string endpointUrl) =>
+        Store.GetPlcs().Any(p => p.EndpointUrl.Equals(endpointUrl, StringComparison.OrdinalIgnoreCase));
+
+    private void Add(DiscoveredServer server)
+    {
+        var name = SuggestName(server);
+        Store.UpsertPlc(new PlcOptions { Name = name, EndpointUrl = server.EndpointUrl, SecurityPolicy = "None" });
+        Nav.NavigateTo("plcs");
+    }
+
+    private string SuggestName(DiscoveredServer server)
+    {
+        var existing = Store.GetPlcs().Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var baseName = !string.IsNullOrWhiteSpace(server.ApplicationName)
+            ? Sanitize(server.ApplicationName!)
+            : "PLC";
+        var name = baseName;
+        var i = 2;
+        while (existing.Contains(name)) name = $"{baseName}{i++}";
+        return name;
+    }
+
+    private static string Sanitize(string s) =>
+        new string(s.Where(c => char.IsLetterOrDigit(c) || c is '_' or '-').ToArray());
+}

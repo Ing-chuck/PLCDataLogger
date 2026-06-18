@@ -9,24 +9,34 @@ using PlcDataLogger.Storage;
 namespace PlcDataLogger.OpcUa;
 
 /// <summary>
-/// Hosted service that owns one <see cref="OpcUaPlcSession"/> per configured PLC and
-/// the periodic re-discovery loop (§5, §7). Each PLC connects independently with
-/// retry/backoff, so one PLC being down never stalls the others.
+/// Hosted service that owns one <see cref="OpcUaPlcSession"/> per configured PLC and the periodic
+/// re-discovery loop (§5, §7). Each PLC connects independently with retry/backoff, so one PLC
+/// being down never stalls the others. The set of PLCs is taken from <see cref="ConfigStore"/> and
+/// reconciled live whenever the configuration changes — connections are added, removed, or
+/// restarted without a service restart (§5).
 /// </summary>
 public sealed class OpcUaClientManager : BackgroundService
 {
     private static readonly TimeSpan ConnectRetryDelay = TimeSpan.FromSeconds(10);
 
     private readonly LoggerOptions _options;
+    private readonly ConfigStore _configStore;
     private readonly LoggerDatabase _db;
     private readonly ReadingBuffer _buffer;
     private readonly HealthMonitor _health;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<OpcUaClientManager> _log;
-    private readonly List<OpcUaPlcSession> _sessions = new();
+
+    private readonly object _gate = new();
+    private readonly Dictionary<string, Runner> _runners = new(StringComparer.OrdinalIgnoreCase);
+
+    private ApplicationConfiguration? _appConfig;
+    private ILogger? _sessionLogger;
+    private CancellationToken _stoppingToken;
 
     public OpcUaClientManager(
         IOptions<LoggerOptions> options,
+        ConfigStore configStore,
         LoggerDatabase db,
         ReadingBuffer buffer,
         HealthMonitor health,
@@ -34,6 +44,7 @@ public sealed class OpcUaClientManager : BackgroundService
         ILogger<OpcUaClientManager> log)
     {
         _options = options.Value;
+        _configStore = configStore;
         _db = db;
         _buffer = buffer;
         _health = health;
@@ -41,18 +52,16 @@ public sealed class OpcUaClientManager : BackgroundService
         _log = log;
     }
 
+    private sealed record Runner(PlcOptions Plc, CancellationTokenSource Cts)
+    {
+        public Task Task { get; set; } = Task.CompletedTask;
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (_options.Plcs.Count == 0)
-        {
-            _log.LogWarning("No PLCs configured under '{Section}:Plcs'; nothing to log.", LoggerOptions.SectionName);
-            return;
-        }
-
-        ApplicationConfiguration appConfig;
         try
         {
-            appConfig = await OpcUaApplication.CreateAsync().ConfigureAwait(false);
+            _appConfig = await OpcUaApplication.CreateAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -60,32 +69,82 @@ public sealed class OpcUaClientManager : BackgroundService
             return;
         }
 
-        var sessionLogger = _loggerFactory.CreateLogger<OpcUaPlcSession>();
+        _sessionLogger = _loggerFactory.CreateLogger<OpcUaPlcSession>();
+        _stoppingToken = stoppingToken;
 
-        // Start every PLC concurrently; each retries on its own.
-        var tasks = _options.Plcs
-            .Select(plc => RunPlcAsync(plc, appConfig, sessionLogger, stoppingToken))
-            .ToArray();
+        _configStore.Changed += OnConfigChanged;
+        Reconcile();
 
-        await Task.WhenAll(tasks).ConfigureAwait(false);
+        // Stay alive until shutdown; PLC work happens on the per-runner tasks.
+        try { await Task.Delay(Timeout.Infinite, stoppingToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) { /* shutting down */ }
+
+        _configStore.Changed -= OnConfigChanged;
+        await StopAllAsync().ConfigureAwait(false);
     }
 
-    private async Task RunPlcAsync(
-        PlcOptions plc,
-        ApplicationConfiguration appConfig,
-        ILogger sessionLogger,
-        CancellationToken ct)
+    private void OnConfigChanged()
+    {
+        try { Reconcile(); }
+        catch (Exception ex) { _log.LogError(ex, "Failed to reconcile PLC sessions after config change."); }
+    }
+
+    /// <summary>Bring running sessions in line with the configured PLC set.</summary>
+    private void Reconcile()
+    {
+        if (_appConfig is null || _sessionLogger is null)
+            return;
+
+        lock (_gate)
+        {
+            var desired = _configStore.GetPlcs().ToDictionary(p => p.Name, StringComparer.OrdinalIgnoreCase);
+
+            // Stop runners that were removed or whose endpoint/security changed.
+            foreach (var name in _runners.Keys.ToList())
+            {
+                var runner = _runners[name];
+                if (!desired.TryGetValue(name, out var want) || !SameConnection(runner.Plc, want))
+                {
+                    _log.LogInformation("[{Plc}] Stopping session (removed or changed).", name);
+                    runner.Cts.Cancel();
+                    _runners.Remove(name);
+                    _health.RemovePlc(name);
+                }
+            }
+
+            // Start runners for newly added / changed PLCs.
+            foreach (var (name, plc) in desired)
+            {
+                if (_runners.ContainsKey(name))
+                    continue;
+
+                _log.LogInformation("[{Plc}] Starting session for {Endpoint}.", name, plc.EndpointUrl);
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(_stoppingToken);
+                var runner = new Runner(plc, cts);
+                runner.Task = RunPlcAsync(plc, cts.Token);
+                _runners[name] = runner;
+            }
+
+            if (_runners.Count == 0)
+                _log.LogWarning("No PLCs configured; add one via the web UI to begin logging.");
+        }
+    }
+
+    private static bool SameConnection(PlcOptions a, PlcOptions b) =>
+        string.Equals(a.EndpointUrl, b.EndpointUrl, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(a.SecurityPolicy, b.SecurityPolicy, StringComparison.OrdinalIgnoreCase);
+
+    private async Task RunPlcAsync(PlcOptions plc, CancellationToken ct)
     {
         var rescanInterval = TimeSpan.FromMinutes(Math.Max(1, _options.Discovery.RescanIntervalMinutes));
         var filter = new TagFilter(_options.Discovery.Filter);
 
         while (!ct.IsCancellationRequested)
         {
-            var session = new OpcUaPlcSession(plc, _options.Subscription, filter, appConfig, _db, _buffer, _health, sessionLogger);
+            var session = new OpcUaPlcSession(plc, _options.Subscription, filter, _appConfig!, _db, _buffer, _health, _sessionLogger!);
             try
             {
                 await session.StartAsync(ct).ConfigureAwait(false);
-                lock (_sessions) _sessions.Add(session);
 
                 // Periodic re-discovery to pick up tag changes after Codesys project updates.
                 while (!ct.IsCancellationRequested)
@@ -102,7 +161,6 @@ public sealed class OpcUaClientManager : BackgroundService
             }
             catch (Exception ex)
             {
-                lock (_sessions) _sessions.Remove(session);
                 await session.DisposeAsync().ConfigureAwait(false);
                 _health.SetDisconnected(plc.Name, ex.Message);
                 _log.LogError(ex, "[{Plc}] Connection failed; retrying in {Delay}s.",
@@ -113,14 +171,18 @@ public sealed class OpcUaClientManager : BackgroundService
         }
     }
 
-    public override async Task StopAsync(CancellationToken cancellationToken)
+    private async Task StopAllAsync()
     {
-        await base.StopAsync(cancellationToken).ConfigureAwait(false);
+        Runner[] runners;
+        lock (_gate)
+        {
+            runners = _runners.Values.ToArray();
+            _runners.Clear();
+        }
 
-        OpcUaPlcSession[] toDispose;
-        lock (_sessions) toDispose = _sessions.ToArray();
+        foreach (var runner in runners)
+            runner.Cts.Cancel();
 
-        foreach (var session in toDispose)
-            await session.DisposeAsync().ConfigureAwait(false);
+        await Task.WhenAll(runners.Select(r => r.Task)).ConfigureAwait(false);
     }
 }

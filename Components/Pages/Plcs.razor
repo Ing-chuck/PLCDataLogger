@@ -1,0 +1,102 @@
+@page "/plcs"
+@using PlcDataLogger.Configuration
+@inject ConfigStore Store
+
+<h1>PLC Connections</h1>
+<p class="sub">Changes apply live — sessions are added, removed, or reconnected without a restart.</p>
+
+<table>
+    <thead>
+        <tr><th>Name</th><th>Endpoint</th><th>Security</th><th></th></tr>
+    </thead>
+    <tbody>
+        @if (_plcs.Count == 0)
+        {
+            <tr><td colspan="4" class="muted">No PLCs configured. Add one below or use <a href="scan">Scan</a>.</td></tr>
+        }
+        @foreach (var plc in _plcs)
+        {
+            <tr>
+                <td>@plc.Name</td>
+                <td class="muted">@plc.EndpointUrl</td>
+                <td>@plc.SecurityPolicy</td>
+                <td>
+                    <button class="btn" @onclick="() => Edit(plc)">Edit</button>
+                    <button class="btn danger" @onclick="() => Remove(plc.Name)">Remove</button>
+                </td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+<h2 class="h2">@(_editingExisting ? "Edit PLC" : "Add PLC")</h2>
+<div class="form">
+    <label>Name
+        <input @bind="_form.Name" disabled="@_editingExisting" placeholder="PLC1" />
+    </label>
+    <label>Endpoint URL
+        <input @bind="_form.EndpointUrl" placeholder="opc.tcp://192.168.1.10:4840" />
+    </label>
+    <label>Security policy
+        <select @bind="_form.SecurityPolicy">
+            <option value="None">None</option>
+            <option value="Basic256Sha256">Basic256Sha256</option>
+        </select>
+    </label>
+    <div class="actions">
+        <button class="btn primary" @onclick="Save">@(_editingExisting ? "Update" : "Add")</button>
+        @if (_editingExisting)
+        {
+            <button class="btn" @onclick="ResetForm">Cancel</button>
+        }
+    </div>
+    @if (_error is not null)
+    {
+        <p class="err">@_error</p>
+    }
+</div>
+
+@code {
+    private IReadOnlyList<PlcOptions> _plcs = Array.Empty<PlcOptions>();
+    private PlcOptions _form = new() { SecurityPolicy = "None" };
+    private bool _editingExisting;
+    private string? _error;
+
+    protected override void OnInitialized() => Load();
+
+    private void Load() => _plcs = Store.GetPlcs();
+
+    private void Edit(PlcOptions plc)
+    {
+        _form = new PlcOptions { Name = plc.Name, EndpointUrl = plc.EndpointUrl, SecurityPolicy = plc.SecurityPolicy };
+        _editingExisting = true;
+        _error = null;
+    }
+
+    private void Save()
+    {
+        _error = null;
+        if (string.IsNullOrWhiteSpace(_form.Name)) { _error = "Name is required."; return; }
+        if (string.IsNullOrWhiteSpace(_form.EndpointUrl) || !_form.EndpointUrl.StartsWith("opc.tcp://", StringComparison.OrdinalIgnoreCase))
+        { _error = "Endpoint must be an opc.tcp:// URL."; return; }
+
+        Store.UpsertPlc(_form);
+        ResetForm();
+        Load();
+    }
+
+    private void Remove(string name)
+    {
+        Store.RemovePlc(name);
+        if (_editingExisting && _form.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            ResetForm();
+        Load();
+    }
+
+    private void ResetForm()
+    {
+        _form = new PlcOptions { SecurityPolicy = "None" };
+        _editingExisting = false;
+        _error = null;
+    }
+}

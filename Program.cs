@@ -51,17 +51,14 @@ try
     builder.Services.AddSingleton<CsvExporter>();
     builder.Services.AddSingleton<HealthMonitor>();
 
-    // Cloud upload provider, selected by configuration. "None" is the default and a fully
-    // supported permanent state for offline sites (§9).
-    builder.Services.AddSingleton<ICloudUploadProvider>(sp =>
-    {
-        var options = sp.GetRequiredService<IOptions<LoggerOptions>>().Value.Upload;
-        return options.Provider.Equals("GoogleDrive", StringComparison.OrdinalIgnoreCase)
-            ? new GoogleDriveUploadProvider(
-                options.GoogleDrive,
-                sp.GetRequiredService<ILogger<GoogleDriveUploadProvider>>())
-            : new NoneUploadProvider();
-    });
+    // Runtime-editable configuration (PLCs + upload) and the network scanner that backs the UI.
+    builder.Services.AddSingleton<ConfigStore>();
+    builder.Services.AddSingleton<OpcUaNetworkScanner>();
+
+    // Active upload provider, rebuilt from config when it changes. "None" is the default and a
+    // fully supported permanent state for offline sites (§9).
+    builder.Services.AddSingleton<UploadProviderResolver>();
+    builder.Services.AddSingleton<ExportRunner>();
 
     builder.Services.AddHostedService<StorageWriter>();
     builder.Services.AddHostedService<OpcUaClientManager>();
@@ -75,8 +72,13 @@ try
     app.UseStaticFiles();
     app.UseAntiforgery();
 
-    // Machine-readable health for monitoring / scripting.
+    // Machine-readable endpoints (localhost only) for monitoring and scripted provisioning.
     app.MapGet("/api/health", (HealthMonitor health) => health.Snapshot());
+    app.MapGet("/api/scan", (OpcUaNetworkScanner scanner, CancellationToken ct) => scanner.ScanAsync(ct: ct));
+    app.MapGet("/api/plcs", (ConfigStore store) => store.GetPlcs());
+    app.MapPost("/api/plcs", (PlcOptions plc, ConfigStore store) => { store.UpsertPlc(plc); return Results.Ok(); });
+    app.MapDelete("/api/plcs/{name}", (string name, ConfigStore store) => { store.RemovePlc(name); return Results.Ok(); });
+    app.MapPost("/api/export-now", (ExportRunner runner, CancellationToken ct) => runner.RunOnceAsync(ct));
 
     app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 
