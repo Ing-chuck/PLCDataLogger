@@ -18,7 +18,7 @@ currently built and how to run it.
 
 ## Status
 
-**Phase 1 (core logging) is implemented and validated against a live PLC:**
+**Phases 1–2 are implemented and validated against a live PLC:**
 
 - Connects to one or more Codesys OPC UA servers (one session per PLC, independent reconnect).
 - Auto-discovers tags by browsing the address space (with continuation-point paging), filtered
@@ -27,9 +27,10 @@ currently built and how to run it.
 - Buffers readings in memory and writes them to SQLite (WAL mode) in batched transactions.
 - Re-runs discovery on a schedule to pick up tags added/removed after a Codesys project update;
   tags that disappear are marked inactive, never deleted, so history is preserved.
+- Runs as a **Windows Service** (auto-start, auto-restart on failure) for unattended operation,
+  or as a console app for development — see [Run as a Windows Service](#run-as-a-windows-service).
 
-Not yet built: Windows Service hosting, CSV export, cloud upload, and the local web UI — see
-[Roadmap](#roadmap).
+Not yet built: CSV export, cloud upload, and the local web UI — see [Roadmap](#roadmap).
 
 ## Requirements
 
@@ -129,13 +130,54 @@ FROM readings r JOIN tags t ON t.tag_id = r.tag_id
 ORDER BY r.id DESC LIMIT 20;
 ```
 
+## Run as a Windows Service
+
+For unattended site deployment the logger installs as a Windows Service that auto-starts on boot
+and auto-restarts on failure. The same binary runs as a console app under `dotnet run`; it detects
+the service control manager automatically.
+
+The data, log, certificate (`pki/`), and `appsettings.json` paths all resolve next to the
+executable, so the service is self-contained in its install directory regardless of the
+account it runs under.
+
+Install scripts live in [`scripts/`](scripts/) and must be run from an **elevated** PowerShell
+prompt. To publish a fresh self-contained build and register the service in one step:
+
+```powershell
+.\scripts\install-service.ps1 -Publish
+```
+
+This publishes a single-file, self-contained build (no .NET runtime required on the target PC)
+to `C:\PLCDataLogger`, then registers a service named `PLCDataLogger` with:
+
+- **Start type:** Automatic (starts on boot)
+- **Recovery:** restart after 5 s, then 10 s, then every 30 s; failure count resets daily
+
+Edit `C:\PLCDataLogger\appsettings.json` for the site, then restart the service
+(`Restart-Service PLCDataLogger`). Logs are written under `C:\PLCDataLogger\logs`.
+
+Common parameters (see the script header for all of them):
+
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `-InstallDir` | `C:\PLCDataLogger` | Where the binaries and data live. |
+| `-Publish` | _(off)_ | Publish a fresh build before installing. |
+| `-ServiceName` | `PLCDataLogger` | Windows Service name. |
+
+To remove the service (leaving the install directory and data in place):
+
+```powershell
+.\scripts\uninstall-service.ps1
+```
+
 ## Project layout
 
 ```text
 Configuration/   Strongly-typed options bound from appsettings.json
 OpcUa/           OPC UA application config, per-PLC session, discovery + tag filter, manager
 Storage/         SQLite database, schema, in-memory buffer, batched writer
-Program.cs       Generic Host wiring (Serilog + hosted services)
+Program.cs       Generic Host wiring (Serilog + Windows Service + hosted services)
+scripts/         Windows Service install / uninstall (PowerShell)
 ```
 
 Built on the OPC Foundation reference stack (`OPCFoundation.NetStandard.Opc.Ua.Client`),
@@ -146,7 +188,7 @@ Built on the OPC Foundation reference stack (`OPCFoundation.NetStandard.Opc.Ua.C
 | Phase | Scope | State |
 | --- | --- | --- |
 | 1 | Core logging: OPC UA discovery/subscription → SQLite | ✅ Done |
-| 2 | Windows Service hosting with auto-restart recovery | Planned |
+| 2 | Multi-PLC + Windows Service hosting with auto-restart recovery | ✅ Done |
 | 3 | CSV export + pluggable cloud upload (Google Drive first), retention/pruning | Planned |
 | 4 | Local web UI (status + configuration, incl. network scan for setup) | Planned |
 | 5 | Multi-site hardening: config validation, packaging/install, field docs | Planned |
