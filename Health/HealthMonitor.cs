@@ -44,7 +44,7 @@ public sealed class HealthMonitor
     private readonly ConcurrentDictionary<string, PlcHealth> _plcs = new();
     private readonly LoggerOptions _options;
     private readonly ReadingBuffer _buffer;
-    private readonly LoggerDatabase _db;
+    private readonly IReadingStore _db;
     private readonly UploadProviderResolver _providers;
 
     private long _readingsWritten;
@@ -53,7 +53,7 @@ public sealed class HealthMonitor
     public HealthMonitor(
         IOptions<LoggerOptions> options,
         ReadingBuffer buffer,
-        LoggerDatabase db,
+        IReadingStore db,
         UploadProviderResolver providers)
     {
         _options = options.Value;
@@ -129,7 +129,7 @@ public sealed class HealthMonitor
     {
         try
         {
-            var root = _db.IsInitialized ? Path.GetPathRoot(_db.FullPath) : null;
+            var root = _db.IsInitialized ? Path.GetPathRoot(_db.PrimaryPath) : null;
             if (string.IsNullOrEmpty(root)) return -1;
             return new DriveInfo(root).AvailableFreeSpace / (1024 * 1024);
         }

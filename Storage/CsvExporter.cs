@@ -8,14 +8,15 @@ public sealed record ExportResult(int RowCount, long MaxReadingId, string? Perio
 
 /// <summary>
 /// Writes readings newer than a given id to a flat, long-format CSV file (§5, §6.2):
-/// one row per reading — <c>timestamp_utc, plc_name, tag_name, value, quality</c>.
-/// Streams through a read-only connection so it never blocks the storage writer.
+/// one row per reading — <c>timestamp_utc, plc_name, tag_name, value, quality</c>. Streams from
+/// the store so it never holds the whole result set in memory or blocks ingestion. Timestamps are
+/// rendered back to ISO 8601 UTC for the file even though they are stored as epoch-ms.
 /// </summary>
 public sealed class CsvExporter
 {
-    private readonly LoggerDatabase _db;
+    private readonly IReadingStore _store;
 
-    public CsvExporter(LoggerDatabase db) => _db = db;
+    public CsvExporter(IReadingStore store) => _store = store;
 
     /// <summary>
     /// Export every reading with <c>id &gt; afterReadingId</c> to <paramref name="filePath"/>.
@@ -27,20 +28,6 @@ public sealed class CsvExporter
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
 
-        using var conn = _db.OpenReadOnlyConnection();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT r.id, r.ts_utc, p.name AS plc_name, t.tag_name, r.value, r.value_text, r.quality
-            FROM readings r
-            JOIN tags t ON t.tag_id = r.tag_id
-            JOIN plcs p ON p.plc_id = t.plc_id
-            WHERE r.id > $afterId
-            ORDER BY r.id;
-            """;
-        cmd.Parameters.AddWithValue("$afterId", afterReadingId);
-
-        using var reader = cmd.ExecuteReader();
-
         var rowCount = 0;
         long maxId = afterReadingId;
         string? firstTs = null;
@@ -49,36 +36,35 @@ public sealed class CsvExporter
         using var writer = new StreamWriter(filePath, append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         writer.WriteLine("timestamp_utc,plc_name,tag_name,value,quality");
 
-        while (reader.Read())
+        foreach (var row in _store.ReadReadingsAfter(afterReadingId))
         {
-            var id = reader.GetInt64(0);
-            var ts = reader.GetString(1);
-            var plcName = reader.GetString(2);
-            var tagName = reader.GetString(3);
-            string value = reader.IsDBNull(4)
-                ? (reader.IsDBNull(5) ? "" : reader.GetString(5))
-                : reader.GetDouble(4).ToString(CultureInfo.InvariantCulture);
-            var quality = reader.GetString(6);
+            var ts = Iso(row.TsUtcMs);
+            var value = row.Value is { } v
+                ? v.ToString(CultureInfo.InvariantCulture)
+                : (row.ValueText ?? "");
 
             writer.Write(Csv(ts));
             writer.Write(',');
-            writer.Write(Csv(plcName));
+            writer.Write(Csv(row.PlcName));
             writer.Write(',');
-            writer.Write(Csv(tagName));
+            writer.Write(Csv(row.TagName));
             writer.Write(',');
             writer.Write(Csv(value));
             writer.Write(',');
-            writer.Write(Csv(quality));
+            writer.Write(Csv(row.Quality));
             writer.Write('\n');
 
             rowCount++;
-            maxId = id;
+            maxId = row.Id;
             firstTs ??= ts;
             lastTs = ts;
         }
 
         return new ExportResult(rowCount, maxId, firstTs, lastTs);
     }
+
+    private static string Iso(long epochMs) =>
+        DateTimeOffset.FromUnixTimeMilliseconds(epochMs).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
 
     /// <summary>Minimal RFC-4180 field escaping.</summary>
     private static string Csv(string field)

@@ -5,21 +5,18 @@ using PlcDataLogger.Configuration;
 namespace PlcDataLogger.Storage;
 
 /// <summary>
-/// A discovered OPC UA variable node that should be logged.
+/// Optimized SQLite implementation of <see cref="IReadingStore"/> — the local time-series source
+/// of truth (§6). WAL mode for crash safety; a single writer connection serialized by a lock.
+///
+/// Storage is tuned for the high-volume readings table: timestamps are stored as INTEGER epoch
+/// milliseconds (not ISO text) and quality as a small INTEGER code, which roughly halves row +
+/// index size and speeds range scans/prunes. The low-volume metadata tables keep human-readable
+/// ISO text. <c>auto_vacuum=INCREMENTAL</c> lets retention reclaim space without a full VACUUM lock.
 /// </summary>
-public sealed record DiscoveredTag(string NodeId, string Name);
-
-/// <summary>An export file awaiting (or retrying) upload.</summary>
-public sealed record PendingUpload(long UploadLogId, string FileName, string FilePath, long MaxReadingId);
-
-/// <summary>
-/// Owns the local SQLite store — the source of truth (§6). Uses WAL mode for crash
-/// safety. A single connection is kept open for the process lifetime; all access is
-/// serialized through a lock since one PLC discovery run and the storage writer can
-/// touch the DB concurrently.
-/// </summary>
-public sealed class LoggerDatabase : IDisposable
+public sealed class LoggerDatabase : IReadingStore, IDisposable
 {
+    private const int PruneBatchSize = 50_000;
+
     private readonly object _gate = new();
     private readonly string _databasePath;
     private SqliteConnection? _connection;
@@ -31,8 +28,9 @@ public sealed class LoggerDatabase : IDisposable
         _databasePath = options.Value.DatabasePath;
     }
 
-    /// <summary>Absolute path to the database file (valid after <see cref="Initialize"/>).</summary>
-    public string FullPath => _fullPath ?? throw new InvalidOperationException("Database not initialized.");
+    public bool IsInitialized => _initialized;
+
+    public string PrimaryPath => _fullPath ?? throw new InvalidOperationException("Database not initialized.");
 
     public void Initialize()
     {
@@ -47,6 +45,8 @@ public sealed class LoggerDatabase : IDisposable
             _connection = new SqliteConnection($"Data Source={fullPath}");
             _connection.Open();
 
+            // auto_vacuum must be set before tables exist on a fresh database.
+            Execute("PRAGMA auto_vacuum=INCREMENTAL;");
             Execute("PRAGMA journal_mode=WAL;");
             Execute("PRAGMA synchronous=NORMAL;");
             Execute("PRAGMA foreign_keys=ON;");
@@ -56,17 +56,11 @@ public sealed class LoggerDatabase : IDisposable
         }
     }
 
-    /// <summary>True once the schema is ready (used by the health UI, which may load early).</summary>
-    public bool IsInitialized => _initialized;
-
-    /// <summary>ISO timestamp of the most recent export, or null.</summary>
     public string? GetLastExportedAt() => ScalarString("SELECT MAX(exported_at) FROM upload_log;");
 
-    /// <summary>ISO timestamp of the most recent successful upload, or null.</summary>
     public string? GetLastUploadedAt() =>
         ScalarString("SELECT MAX(uploaded_at) FROM upload_log WHERE status = 'Uploaded';");
 
-    /// <summary>Insert the PLC if new, returning its plc_id.</summary>
     public int UpsertPlc(string name, string endpointUrl, string securityPolicy)
     {
         lock (_gate)
@@ -87,12 +81,7 @@ public sealed class LoggerDatabase : IDisposable
         }
     }
 
-    /// <summary>
-    /// Reconcile the discovered tag set for a PLC: upsert each tag (active=1, refreshed
-    /// last_seen), mark any tag no longer present as inactive (never deleted, so history
-    /// survives — §7), and return a node-id → tag_id map for subscription setup.
-    /// </summary>
-    public Dictionary<string, int> SyncTags(int plcId, IReadOnlyCollection<DiscoveredTag> tags)
+    public IReadOnlyList<TagBinding> SyncTags(int plcId, IReadOnlyCollection<DiscoveredTag> tags)
     {
         lock (_gate)
         {
@@ -135,23 +124,26 @@ public sealed class LoggerDatabase : IDisposable
                 deactivate.ExecuteNonQuery();
             }
 
-            var map = new Dictionary<string, int>();
+            var bindings = new List<TagBinding>();
             using (var select = Conn.CreateCommand())
             {
                 select.Transaction = tx;
-                select.CommandText = "SELECT node_id, tag_id FROM tags WHERE plc_id = $plc;";
+                select.CommandText =
+                    "SELECT node_id, tag_id, deadband_override FROM tags WHERE plc_id = $plc AND active = 1;";
                 select.Parameters.AddWithValue("$plc", plcId);
                 using var reader = select.ExecuteReader();
                 while (reader.Read())
-                    map[reader.GetString(0)] = reader.GetInt32(1);
+                {
+                    var deadband = reader.IsDBNull(2) ? (double?)null : reader.GetDouble(2);
+                    bindings.Add(new TagBinding(reader.GetString(0), reader.GetInt32(1), deadband));
+                }
             }
 
             tx.Commit();
-            return map;
+            return bindings;
         }
     }
 
-    /// <summary>Batched insert of buffered readings inside a single transaction (§5 Storage Writer).</summary>
     public void InsertReadings(IReadOnlyList<Reading> batch)
     {
         if (batch.Count == 0) return;
@@ -165,20 +157,20 @@ public sealed class LoggerDatabase : IDisposable
                 VALUES ($tag, $ts, $rx, $val, $txt, $q);
                 """;
             var pTag = cmd.Parameters.Add("$tag", SqliteType.Integer);
-            var pTs = cmd.Parameters.Add("$ts", SqliteType.Text);
-            var pRx = cmd.Parameters.Add("$rx", SqliteType.Text);
+            var pTs = cmd.Parameters.Add("$ts", SqliteType.Integer);
+            var pRx = cmd.Parameters.Add("$rx", SqliteType.Integer);
             var pVal = cmd.Parameters.Add("$val", SqliteType.Real);
             var pTxt = cmd.Parameters.Add("$txt", SqliteType.Text);
-            var pQ = cmd.Parameters.Add("$q", SqliteType.Text);
+            var pQ = cmd.Parameters.Add("$q", SqliteType.Integer);
 
             foreach (var r in batch)
             {
                 pTag.Value = r.TagId;
-                pTs.Value = Iso(r.TsSourceUtc);
-                pRx.Value = Iso(r.TsReceivedUtc);
+                pTs.Value = ToEpochMs(r.TsSourceUtc);
+                pRx.Value = ToEpochMs(r.TsReceivedUtc);
                 pVal.Value = (object?)r.Value ?? DBNull.Value;
                 pTxt.Value = (object?)r.ValueText ?? DBNull.Value;
-                pQ.Value = r.Quality;
+                pQ.Value = QualityCode(r.Quality);
                 cmd.ExecuteNonQuery();
             }
 
@@ -186,7 +178,36 @@ public sealed class LoggerDatabase : IDisposable
         }
     }
 
-    /// <summary>Record a tag's data type once it is known from the first received value.</summary>
+    public IEnumerable<ExportRow> ReadReadingsAfter(long afterId)
+    {
+        // Separate read-only connection: WAL lets this stream concurrently with the writer.
+        using var conn = new SqliteConnection($"Data Source={PrimaryPath};Mode=ReadOnly");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT r.id, r.ts_utc, p.name, t.tag_name, r.value, r.value_text, r.quality
+            FROM readings r
+            JOIN tags t ON t.tag_id = r.tag_id
+            JOIN plcs p ON p.plc_id = t.plc_id
+            WHERE r.id > $afterId
+            ORDER BY r.id;
+            """;
+        cmd.Parameters.AddWithValue("$afterId", afterId);
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            yield return new ExportRow(
+                reader.GetInt64(0),
+                reader.GetInt64(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                QualityName(reader.GetInt32(6)));
+        }
+    }
+
     public void SetTagDataType(int tagId, string dataType)
     {
         lock (_gate)
@@ -199,24 +220,11 @@ public sealed class LoggerDatabase : IDisposable
         }
     }
 
-    /// <summary>Open a separate read-only connection. WAL mode allows this to run
-    /// concurrently with the writer, so large CSV exports never block ingestion.</summary>
-    public SqliteConnection OpenReadOnlyConnection()
-    {
-        var conn = new SqliteConnection($"Data Source={FullPath};Mode=ReadOnly");
-        conn.Open();
-        return conn;
-    }
-
-    /// <summary>Highest reading id that has been written to any export file.</summary>
     public long GetMaxExportedReadingId() => ScalarLong("SELECT MAX(max_reading_id) FROM upload_log;");
 
-    /// <summary>Highest reading id confirmed uploaded — the watermark below which
-    /// upload-gated pruning is allowed (§8).</summary>
     public long GetMaxUploadedReadingId() =>
         ScalarLong("SELECT MAX(max_reading_id) FROM upload_log WHERE status = 'Uploaded';");
 
-    /// <summary>Record a freshly written export file (status 'Exported'), returning its id.</summary>
     public long RecordExport(string fileName, string filePath, string? periodStart, string? periodEnd,
         long maxReadingId, int rowCount)
     {
@@ -240,7 +248,6 @@ public sealed class LoggerDatabase : IDisposable
         }
     }
 
-    /// <summary>Export files not yet uploaded (status != 'Uploaded'), oldest first.</summary>
     public List<PendingUpload> GetPendingUploads()
     {
         lock (_gate)
@@ -279,23 +286,40 @@ public sealed class LoggerDatabase : IDisposable
         }
     }
 
-    /// <summary>Delete readings older than <paramref name="cutoffUtc"/>. When
-    /// <paramref name="maxReadingIdInclusive"/> is non-null, only readings at or below that
-    /// id are pruned (upload-confirmed watermark). Returns the number of rows deleted.</summary>
     public int PruneReadings(DateTime cutoffUtc, long? maxReadingIdInclusive)
     {
+        var cutoff = ToEpochMs(cutoffUtc);
         lock (_gate)
         {
-            using var cmd = Conn.CreateCommand();
-            cmd.CommandText = maxReadingIdInclusive is null
-                ? "DELETE FROM readings WHERE ts_utc < $cutoff;"
-                : "DELETE FROM readings WHERE ts_utc < $cutoff AND id <= $maxId;";
-            cmd.Parameters.AddWithValue("$cutoff", Iso(cutoffUtc));
-            if (maxReadingIdInclusive is not null)
-                cmd.Parameters.AddWithValue("$maxId", maxReadingIdInclusive.Value);
-            return cmd.ExecuteNonQuery();
+            var total = 0;
+            // Delete in bounded batches so the WAL doesn't balloon on a large sweep.
+            while (true)
+            {
+                using var cmd = Conn.CreateCommand();
+                cmd.CommandText = maxReadingIdInclusive is null
+                    ? "DELETE FROM readings WHERE id IN (SELECT id FROM readings WHERE ts_utc < $cutoff LIMIT $limit);"
+                    : "DELETE FROM readings WHERE id IN (SELECT id FROM readings WHERE ts_utc < $cutoff AND id <= $maxId LIMIT $limit);";
+                cmd.Parameters.AddWithValue("$cutoff", cutoff);
+                cmd.Parameters.AddWithValue("$limit", PruneBatchSize);
+                if (maxReadingIdInclusive is not null)
+                    cmd.Parameters.AddWithValue("$maxId", maxReadingIdInclusive.Value);
+
+                var deleted = cmd.ExecuteNonQuery();
+                total += deleted;
+                if (deleted < PruneBatchSize)
+                    break;
+            }
+
+            if (total > 0)
+            {
+                Execute("PRAGMA incremental_vacuum;");
+                Execute("PRAGMA wal_checkpoint(TRUNCATE);");
+            }
+            return total;
         }
     }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private string? ScalarString(string sql)
     {
@@ -329,18 +353,28 @@ public sealed class LoggerDatabase : IDisposable
         cmd.ExecuteNonQuery();
     }
 
-    private static string IsoNow() => Iso(DateTime.UtcNow);
+    private static long ToEpochMs(DateTime dt) => new DateTimeOffset(dt.ToUniversalTime()).ToUnixTimeMilliseconds();
 
-    private static string Iso(DateTime dt) =>
-        dt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+    private static string IsoNow() => DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
 
-    public void Dispose()
+    private static int QualityCode(string quality) => quality switch
     {
-        _connection?.Dispose();
-    }
+        "Good" => 0,
+        "Bad" => 2,
+        _ => 1, // Uncertain
+    };
 
-    // Long/narrow schema (§6.1): one row per reading, so adding/removing tags never
-    // requires a schema migration. UNIQUE constraints added to make upserts clean.
+    private static string QualityName(int code) => code switch
+    {
+        0 => "Good",
+        2 => "Bad",
+        _ => "Uncertain",
+    };
+
+    public void Dispose() => _connection?.Dispose();
+
+    // Long/narrow schema (§6.1): one row per reading. The high-volume readings table uses
+    // INTEGER epoch-ms timestamps and an INTEGER quality code; metadata tables keep ISO text.
     private const string SchemaSql = """
         CREATE TABLE IF NOT EXISTS plcs (
             plc_id          INTEGER PRIMARY KEY,
@@ -366,11 +400,11 @@ public sealed class LoggerDatabase : IDisposable
         CREATE TABLE IF NOT EXISTS readings (
             id              INTEGER PRIMARY KEY,
             tag_id          INTEGER NOT NULL REFERENCES tags(tag_id),
-            ts_utc          TEXT NOT NULL,
-            ts_received_utc TEXT,
+            ts_utc          INTEGER NOT NULL,   -- epoch milliseconds UTC (source timestamp)
+            ts_received_utc INTEGER,            -- epoch milliseconds UTC (received at logger)
             value           REAL,
             value_text      TEXT,
-            quality         TEXT NOT NULL
+            quality         INTEGER NOT NULL    -- 0=Good, 1=Uncertain, 2=Bad
         );
 
         CREATE INDEX IF NOT EXISTS idx_readings_tag_ts ON readings(tag_id, ts_utc);

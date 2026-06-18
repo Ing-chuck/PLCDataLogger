@@ -14,12 +14,12 @@ public sealed class StorageWriter : BackgroundService
     private static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(1000);
 
     private readonly ReadingBuffer _buffer;
-    private readonly LoggerDatabase _db;
+    private readonly IReadingStore _db;
     private readonly HealthMonitor _health;
     private readonly ILogger<StorageWriter> _log;
     private readonly HashSet<int> _typedTags = new();
 
-    public StorageWriter(ReadingBuffer buffer, LoggerDatabase db, HealthMonitor health, ILogger<StorageWriter> log)
+    public StorageWriter(ReadingBuffer buffer, IReadingStore db, HealthMonitor health, ILogger<StorageWriter> log)
     {
         _buffer = buffer;
         _db = db;

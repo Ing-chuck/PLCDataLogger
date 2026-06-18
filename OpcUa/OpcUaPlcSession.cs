@@ -24,7 +24,7 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
     private readonly SubscriptionOptions _subOptions;
     private readonly TagFilter _filter;
     private readonly ApplicationConfiguration _appConfig;
-    private readonly LoggerDatabase _db;
+    private readonly IReadingStore _db;
     private readonly ReadingBuffer _buffer;
     private readonly HealthMonitor _health;
     private readonly ILogger _log;
@@ -39,7 +39,7 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
         SubscriptionOptions subOptions,
         TagFilter filter,
         ApplicationConfiguration appConfig,
-        LoggerDatabase db,
+        IReadingStore db,
         ReadingBuffer buffer,
         HealthMonitor health,
         ILogger log)
@@ -94,14 +94,18 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
         var discovered = BrowseTags(_session, ct);
         _log.LogInformation("[{Plc}] Discovery found {Count} variable tags.", _plc.Name, discovered.Count);
 
-        var tagMap = _db.SyncTags(_plcId, discovered);
-        await BuildSubscriptionAsync(discovered, tagMap, ct).ConfigureAwait(false);
+        var bindings = _db.SyncTags(_plcId, discovered);
+        var nameByNode = discovered
+            .GroupBy(d => d.NodeId, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().Name, StringComparer.Ordinal);
+
+        await BuildSubscriptionAsync(bindings, nameByNode, ct).ConfigureAwait(false);
         _health.SetDiscovery(_plc.Name, discovered.Count, (int)(_subscription?.MonitoredItemCount ?? 0));
     }
 
     private async Task BuildSubscriptionAsync(
-        IReadOnlyList<DiscoveredTag> tags,
-        IReadOnlyDictionary<string, int> tagMap,
+        IReadOnlyList<TagBinding> bindings,
+        IReadOnlyDictionary<string, string> nameByNode,
         CancellationToken ct)
     {
         if (_session is null) return;
@@ -124,22 +128,19 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
         _session.AddSubscription(subscription);
         subscription.Create();
 
-        var items = new List<MonitoredItem>(tags.Count);
-        foreach (var tag in tags)
+        var items = new List<MonitoredItem>(bindings.Count);
+        foreach (var binding in bindings)
         {
-            if (!tagMap.TryGetValue(tag.NodeId, out var tagId))
-                continue;
-
             var item = new MonitoredItem(subscription.DefaultItem)
             {
-                StartNodeId = NodeId.Parse(tag.NodeId),
+                StartNodeId = NodeId.Parse(binding.NodeId),
                 AttributeId = Attributes.Value,
-                DisplayName = tag.Name,
+                DisplayName = nameByNode.GetValueOrDefault(binding.NodeId, binding.NodeId),
                 SamplingInterval = _subOptions.SamplingIntervalMs,
                 QueueSize = (uint)_subOptions.QueueSize,
                 DiscardOldest = true,
                 MonitoringMode = MonitoringMode.Reporting,
-                Handle = tagId,
+                Handle = binding.TagId,
             };
             item.Notification += OnNotification;
             items.Add(item);

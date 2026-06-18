@@ -21,7 +21,7 @@ public sealed class OpcUaClientManager : BackgroundService
 
     private readonly LoggerOptions _options;
     private readonly ConfigStore _configStore;
-    private readonly LoggerDatabase _db;
+    private readonly IReadingStore _db;
     private readonly ReadingBuffer _buffer;
     private readonly HealthMonitor _health;
     private readonly ILoggerFactory _loggerFactory;
@@ -37,7 +37,7 @@ public sealed class OpcUaClientManager : BackgroundService
     public OpcUaClientManager(
         IOptions<LoggerOptions> options,
         ConfigStore configStore,
-        LoggerDatabase db,
+        IReadingStore db,
         ReadingBuffer buffer,
         HealthMonitor health,
         ILoggerFactory loggerFactory,

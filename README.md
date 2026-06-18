@@ -147,20 +147,33 @@ dotnet run
 The service connects, discovers and subscribes, and begins writing to the configured database.
 Application logs are written to the console and to rolling files under `logs/`.
 
+### Storage engine
+
+Local storage is **SQLite** (WAL mode) behind an `IReadingStore` abstraction, so the rest of the
+system never depends on storage internals and the engine can evolve independently. SQLite is the
+right fit for the edge "install-and-forget, no DBA, works offline, single self-contained exe" model.
+
+The high-volume `readings` table is tuned for time-series throughput and footprint:
+
+- Timestamps stored as **INTEGER epoch-milliseconds** (not ISO text) — roughly halves row + index
+  size and speeds range scans/prunes. Quality is a small **INTEGER code**.
+- **Retention** prunes in bounded batches and reclaims space via `auto_vacuum=INCREMENTAL`, avoiding
+  a full-file `VACUUM` lock.
+
+This comfortably covers the design target of ~50–150 change-events/sec (tens of GB per quarter). At
+sustained hundreds/sec, the next steps would be monthly partitioning (instant drop instead of
+delete) and, if needed, a compressed columnar long-term store (DuckDB/Parquet) — all behind the same
+`IReadingStore` seam, keeping the embedded, server-less deployment model. (Cutting volume at the
+source with OPC UA **deadbands** is the highest-leverage lever and is the first thing to apply.)
+
 ### Inspecting the data
 
-The database uses a long/narrow schema (one row per reading), so adding or removing tags never
-requires a schema migration:
-
-- `plcs` — configured PLCs
-- `tags` — discovered tags (with `active` flag, `first_seen_at` / `last_seen_at`)
-- `readings` — one row per value change (`ts_utc`, `value` / `value_text`, `quality`)
-- `upload_log`, `settings` — reserved for later phases
-
-Open `data/plcdata.db` with any SQLite tool, e.g.:
+Long/narrow schema (one row per reading), so adding/removing tags never needs a migration:
+`plcs`, `tags`, `readings` (`ts_utc` epoch-ms, `value`/`value_text`, `quality` code), `upload_log`,
+`settings`. Open `data/plcdata.db` with any SQLite tool — timestamps are epoch-ms, e.g.:
 
 ```sql
-SELECT t.tag_name, r.ts_utc, r.value, r.value_text, r.quality
+SELECT t.tag_name, datetime(r.ts_utc/1000, 'unixepoch') AS ts, r.value, r.quality
 FROM readings r JOIN tags t ON t.tag_id = r.tag_id
 ORDER BY r.id DESC LIMIT 20;
 ```
@@ -282,7 +295,7 @@ configured provider, so a genuinely failing upload stands out (§9).
 ```text
 Configuration/   Options, runtime-editable ConfigStore (config.local.json)
 OpcUa/           OPC UA app config, per-PLC session, discovery + tag filter, manager, network scanner
-Storage/         SQLite database, in-memory buffer, batched writer, CSV export, retention
+Storage/         IReadingStore + optimized SQLite store, buffer, batched writer, CSV export, retention
 Upload/          Pluggable cloud upload (None + Google Drive, DPAPI token store, provider resolver)
 Export/          Scheduled export + upload orchestration
 Health/          Runtime health collector surfaced to the web UI

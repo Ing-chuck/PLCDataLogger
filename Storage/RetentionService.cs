@@ -16,13 +16,13 @@ namespace PlcDataLogger.Storage;
 public sealed class RetentionService : BackgroundService
 {
     private readonly LoggerOptions _options;
-    private readonly LoggerDatabase _db;
+    private readonly IReadingStore _db;
     private readonly UploadProviderResolver _providers;
     private readonly ILogger<RetentionService> _log;
 
     public RetentionService(
         IOptions<LoggerOptions> options,
-        LoggerDatabase db,
+        IReadingStore db,
         UploadProviderResolver providers,
         ILogger<RetentionService> log)
     {
@@ -85,7 +85,7 @@ public sealed class RetentionService : BackgroundService
     {
         try
         {
-            var root = Path.GetPathRoot(_db.FullPath);
+            var root = Path.GetPathRoot(_db.PrimaryPath);
             if (string.IsNullOrEmpty(root)) return;
             var drive = new DriveInfo(root);
             var freeMb = drive.AvailableFreeSpace / (1024 * 1024);

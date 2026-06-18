@@ -19,14 +19,14 @@ public sealed class ExportRunner
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly LoggerOptions _options;
     private readonly CsvExporter _exporter;
-    private readonly LoggerDatabase _db;
+    private readonly IReadingStore _db;
     private readonly UploadProviderResolver _providers;
     private readonly ILogger<ExportRunner> _log;
 
     public ExportRunner(
         IOptions<LoggerOptions> options,
         CsvExporter exporter,
-        LoggerDatabase db,
+        IReadingStore db,
         UploadProviderResolver providers,
         ILogger<ExportRunner> log)
     {

@@ -47,7 +47,7 @@ try
     builder.WebHost.ConfigureKestrel(options => options.ListenLocalhost(uiPort));
 
     builder.Services.AddSingleton<ReadingBuffer>();
-    builder.Services.AddSingleton<LoggerDatabase>();
+    builder.Services.AddSingleton<IReadingStore, LoggerDatabase>();
     builder.Services.AddSingleton<CsvExporter>();
     builder.Services.AddSingleton<HealthMonitor>();
 
