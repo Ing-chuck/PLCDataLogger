@@ -49,7 +49,21 @@ foreach ($doc in @('DEPLOYMENT.md', 'README.md')) {
     if (Test-Path $src) { Copy-Item $src $stage -Force }
 }
 
-# 3) Zip it up; the zip is the single artifact to copy to a site.
+# 3) Defensively scrub any per-site secrets or runtime data that must never ship, in case the
+#    publish step ever picks one up. Credentials are placed on-site after install, never bundled.
+foreach ($secret in @('secrets', 'pki', 'data', 'logs', 'exports', 'google_token',
+                       'google_client.json', 'config.local.json')) {
+    $target = Join-Path $stage $secret
+    if (Test-Path $target) {
+        Write-Host "Scrubbing '$secret' from the package." -ForegroundColor Yellow
+        Remove-Item $target -Recurse -Force
+    }
+}
+foreach ($enc in (Get-ChildItem $stage -Recurse -Filter '*.dpapi' -File -ErrorAction SilentlyContinue)) {
+    Remove-Item -LiteralPath $enc.FullName -Force
+}
+
+# 4) Zip it up; the zip is the single artifact to copy to a site.
 $zip = Join-Path $OutputDir "$stageName.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path "$stage\*" -DestinationPath $zip

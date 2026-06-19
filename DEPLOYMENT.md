@@ -48,6 +48,11 @@ Open `http://localhost:5198/` on the PC and use the web UI (the primary configur
    client JSON, and click **Connect Google…** once. See the upload section in
    [README](README.md#export-upload--retention) for the Google Cloud setup. Leave as `None` for
    offline sites.
+
+   > **Credentials are never bundled in the distribution.** Place the OAuth client JSON on the
+   > target PC after install (e.g. in a `secrets\` folder next to the exe) and point the Upload page
+   > at it. The encrypted token the app then stores (`google_token\`) and the OPC UA certificate
+   > store (`pki\`) are likewise per-machine and must stay on the site.
 3. **Tuning** *(in `appsettings.json`, then restart the service)* — `Storage.RetentionDays`,
    `Export.DailyAtLocalTime`, and `Subscription.DefaultDeadband` (raise to cut volume from noisy
    analog tags).

@@ -11,6 +11,19 @@
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
 
+  <!-- Never publish per-site secrets or runtime data. The Web SDK auto-includes every *.json as
+       content, which would otherwise sweep secrets/ and config.local.json into the output/zip. -->
+  <ItemGroup>
+    <Content Remove="secrets/**" />
+    <Content Remove="pki/**" />
+    <Content Remove="data/**" />
+    <Content Remove="logs/**" />
+    <Content Remove="exports/**" />
+    <Content Remove="google_token/**" />
+    <Content Remove="google_client.json" />
+    <Content Remove="config.local.json" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Google.Apis.Drive.v3" Version="1.74.0.4135" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.9" />
