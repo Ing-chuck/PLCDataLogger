@@ -1,7 +1,11 @@
 @page "/"
+@using Microsoft.Extensions.Options
+@using PlcDataLogger.Configuration
 @using PlcDataLogger.Export
 @inject HealthMonitor Health
 @inject ExportRunner Runner
+@inject IOptions<LoggerOptions> Options
+@inject ConfigStore Store
 @implements IDisposable
 
 @if (_s is null)
@@ -26,6 +30,19 @@
                 }
             </div>
         </div>
+
+        @if (_issues.Count > 0)
+        {
+            <div class="banner @(_issues.Any(i => i.IsError) ? "banner-err" : "banner-warn")">
+                <strong>@_issues.Count(i => i.IsError) configuration error(s), @_issues.Count(i => !i.IsError) warning(s)</strong>
+                <ul>
+                    @foreach (var issue in _issues)
+                    {
+                        <li>@(issue.IsError ? "✕" : "⚠") @issue.Message</li>
+                    }
+                </ul>
+            </div>
+        }
 
         <div class="cards">
             <div class="card">
@@ -99,6 +116,8 @@
                 }
             </tbody>
         </table>
+
+        <p class="sub footer">PLC Data Logger v@_s.Version · @_s.UploadProvider upload</p>
 }
 
 @code {
@@ -106,16 +125,22 @@
     private Timer? _timer;
     private bool _running;
     private string? _runMessage;
+    private IReadOnlyList<ConfigIssue> _issues = Array.Empty<ConfigIssue>();
 
     protected override void OnInitialized()
     {
         _s = Health.Snapshot();
+        RefreshIssues();
         _timer = new Timer(_ => InvokeAsync(() =>
         {
             _s = Health.Snapshot();
+            RefreshIssues();
             StateHasChanged();
         }), null, 2000, 2000);
     }
+
+    private void RefreshIssues() =>
+        _issues = ConfigValidation.Validate(Options.Value, Store.GetPlcs(), Store.GetUpload());
 
     private async Task ExportNow()
     {

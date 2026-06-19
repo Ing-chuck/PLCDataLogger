@@ -75,10 +75,9 @@
 
     private void Save()
     {
-        _error = null;
-        if (string.IsNullOrWhiteSpace(_form.Name)) { _error = "Name is required."; return; }
-        if (string.IsNullOrWhiteSpace(_form.EndpointUrl) || !_form.EndpointUrl.StartsWith("opc.tcp://", StringComparison.OrdinalIgnoreCase))
-        { _error = "Endpoint must be an opc.tcp:// URL."; return; }
+        _error = ConfigValidation.ValidatePlc(_form);
+        if (_error is not null)
+            return;
 
         Store.UpsertPlc(_form);
         ResetForm();

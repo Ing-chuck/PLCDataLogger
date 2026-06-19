@@ -329,4 +329,7 @@ Built on the OPC Foundation reference stack (`OPCFoundation.NetStandard.Opc.Ua.C
 | 4a | Observability: localhost status dashboard + `/api/health`, health monitor | ✅ Done |
 | 4b | Config UI: edit PLCs (live hot-reload), network scan, upload settings + JSON APIs | ✅ Done |
 | 4b* | Google Drive upload + OAuth consent (validated); cert-trust acceptance still untested | Mostly done |
-| 5 | Multi-site hardening: config validation, packaging/install, field docs | Planned |
+| 5 | Multi-site hardening: config validation, packaging/install, field docs | ✅ Done |
+
+For on-site install/configure/verify/update/troubleshoot steps, see
+**[DEPLOYMENT.md](DEPLOYMENT.md)**.

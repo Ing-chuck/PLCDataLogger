@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Reflection;
 using Microsoft.Extensions.Options;
 using PlcDataLogger.Configuration;
 using PlcDataLogger.Storage;
@@ -23,6 +24,7 @@ public sealed class PlcHealth
 public sealed class HealthSnapshot
 {
     public DateTime GeneratedUtc { get; init; }
+    public string Version { get; init; } = "";
     public required string SiteName { get; init; }
     public required IReadOnlyList<PlcHealth> Plcs { get; init; }
     public long ReadingsWritten { get; init; }
@@ -111,6 +113,7 @@ public sealed class HealthMonitor
         return new HealthSnapshot
         {
             GeneratedUtc = DateTime.UtcNow,
+            Version = BuildVersion,
             SiteName = _options.SiteName,
             Plcs = _plcs.Values.OrderBy(p => p.Name).ToList(),
             ReadingsWritten = written,
@@ -122,6 +125,12 @@ public sealed class HealthMonitor
             FreeDiskMb = FreeDiskMb(),
         };
     }
+
+    private static readonly string BuildVersion =
+        (Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion
+            ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString()
+            ?? "unknown").Split('+')[0];
 
     private PlcHealth Get(string plc) => _plcs.GetOrAdd(plc, n => new PlcHealth { Name = n });
 

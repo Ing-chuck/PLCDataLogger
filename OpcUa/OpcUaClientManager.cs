@@ -118,6 +118,15 @@ public sealed class OpcUaClientManager : BackgroundService
                 if (_runners.ContainsKey(name))
                     continue;
 
+                // Skip invalid PLCs (non-fatal): surface the reason and keep the others running.
+                var error = ConfigValidation.ValidatePlc(plc);
+                if (error is not null)
+                {
+                    _log.LogError("[{Plc}] Skipping invalid PLC configuration: {Error}", name, error);
+                    _health.SetDisconnected(name, $"Invalid configuration: {error}");
+                    continue;
+                }
+
                 _log.LogInformation("[{Plc}] Starting session for {Endpoint}.", name, plc.EndpointUrl);
                 var cts = CancellationTokenSource.CreateLinkedTokenSource(_stoppingToken);
                 var runner = new Runner(plc, cts);

@@ -21,6 +21,9 @@ google_client.json
 # Runtime-editable configuration (per-site; written by the web UI)
 config.local.json
 
+# Packaging output
+dist/
+
 # User-specific files
 *.rsuser
 *.suo

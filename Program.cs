@@ -60,6 +60,7 @@ try
     builder.Services.AddSingleton<UploadProviderResolver>();
     builder.Services.AddSingleton<ExportRunner>();
 
+    builder.Services.AddHostedService<StartupValidationService>();
     builder.Services.AddHostedService<StorageWriter>();
     builder.Services.AddHostedService<OpcUaClientManager>();
     builder.Services.AddHostedService<ExportUploadService>();
@@ -79,6 +80,8 @@ try
     app.MapPost("/api/plcs", (PlcOptions plc, ConfigStore store) => { store.UpsertPlc(plc); return Results.Ok(); });
     app.MapDelete("/api/plcs/{name}", (string name, ConfigStore store) => { store.RemovePlc(name); return Results.Ok(); });
     app.MapPost("/api/export-now", (ExportRunner runner, CancellationToken ct) => runner.RunOnceAsync(ct));
+    app.MapGet("/api/config/validate", (IOptions<LoggerOptions> opts, ConfigStore store) =>
+        ConfigValidation.Validate(opts.Value, store.GetPlcs(), store.GetUpload()));
 
     app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 
