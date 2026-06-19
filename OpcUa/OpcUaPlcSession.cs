@@ -34,6 +34,8 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
     private SessionReconnectHandler? _reconnectHandler;
     private int _plcId;
 
+    private readonly DeadbandGate _deadband = new();
+
     public OpcUaPlcSession(
         PlcOptions plc,
         SubscriptionOptions subOptions,
@@ -118,6 +120,12 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
             _subscription = null;
         }
 
+        // Configure the client-side deadband (applied in OnNotification). We don't use an OPC UA
+        // server-side DataChangeFilter because Codesys only accepts deadband on AnalogItem nodes
+        // and rejects it on plain IEC numeric variables; client-side works on any server.
+        _deadband.SetDeadbands(bindings.Select(b => (b.TagId, b.Deadband ?? _subOptions.DefaultDeadband)));
+        var deadbanded = _deadband.Count;
+
         var subscription = new Subscription(_session.DefaultSubscription)
         {
             DisplayName = $"{_plc.Name}-sub",
@@ -150,7 +158,8 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
         subscription.ApplyChanges();
         _subscription = subscription;
 
-        _log.LogInformation("[{Plc}] Subscribed to {Count} monitored items.", _plc.Name, items.Count);
+        _log.LogInformation("[{Plc}] Subscribed to {Count} monitored items ({Deadbanded} with client-side deadband).",
+            _plc.Name, items.Count, deadbanded);
         await Task.CompletedTask;
     }
 
@@ -258,6 +267,8 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
         foreach (var value in item.DequeueValues())
         {
             var reading = ToReading(tagId, value);
+            if (!_deadband.Pass(tagId, reading.Value, reading.Quality == "Good"))
+                continue;
             if (!_buffer.TryWrite(reading))
                 _log.LogWarning("[{Plc}] Buffer rejected a reading for tag {TagId}.", _plc.Name, tagId);
         }

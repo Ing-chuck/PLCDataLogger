@@ -163,8 +163,20 @@ The high-volume `readings` table is tuned for time-series throughput and footpri
 This comfortably covers the design target of ~50–150 change-events/sec (tens of GB per quarter). At
 sustained hundreds/sec, the next steps would be monthly partitioning (instant drop instead of
 delete) and, if needed, a compressed columnar long-term store (DuckDB/Parquet) — all behind the same
-`IReadingStore` seam, keeping the embedded, server-less deployment model. (Cutting volume at the
-source with OPC UA **deadbands** is the highest-leverage lever and is the first thing to apply.)
+`IReadingStore` seam, keeping the embedded, server-less deployment model.
+
+### Deadbands (volume reduction)
+
+The highest-leverage way to control volume is a **deadband** — a numeric tag only records a new
+reading when its value moves by at least `Subscription.DefaultDeadband` from the last stored value
+(a per-tag `deadband_override` takes precedence; `0` disables). Booleans/strings and non-Good
+quality always pass through, so transitions and quality events are never lost.
+
+The deadband is applied **client-side** (in the logger), not via an OPC UA server-side
+`DataChangeFilter`: Codesys's server only accepts server-side deadband on `AnalogItem` nodes and
+rejects it on plain IEC numeric variables. Client-side works on any server and directly reduces
+stored volume — exactly the bottleneck — at the cost of unchanged PLC→logger network traffic (which
+is trivial on a LAN).
 
 ### Inspecting the data
 

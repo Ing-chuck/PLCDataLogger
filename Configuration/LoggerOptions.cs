@@ -120,6 +120,11 @@ public sealed class SubscriptionOptions
 
     /// <summary>Server-side queue depth per monitored item, so bursts aren't dropped.</summary>
     public int QueueSize { get; set; } = 10;
+
+    /// <summary>Default absolute deadband for numeric tags — a value only generates a new reading
+    /// when it changes by at least this much (cuts noise-driven volume at the source). 0 disables.
+    /// A per-tag <c>deadband_override</c> takes precedence. Non-numeric tags are never deadbanded.</summary>
+    public double DefaultDeadband { get; set; } = 0;
 }
 
 public sealed class PlcOptions
