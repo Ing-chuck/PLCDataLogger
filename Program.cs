@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PlcDataLogger.Components;
@@ -25,6 +26,16 @@ Log.Logger = new LoggerConfiguration()
         rollingInterval: RollingInterval.Day,
         retainedFileCountLimit: 14)
     .CreateLogger();
+
+// One-time Google Drive consent for field setup. The web "Connect Google…" button can't open a
+// browser when the logger runs as a Windows Service (session 0, no desktop), so an operator runs
+// `PLCDataLogger.exe --authorize` from a desktop session instead. The resulting token is encrypted
+// with DPAPI (LocalMachine), so the service can then read it.
+if (args.Any(a => string.Equals(a, "--authorize", StringComparison.OrdinalIgnoreCase)))
+{
+    try { return await RunGoogleAuthorizeAsync(); }
+    finally { Log.CloseAndFlush(); }
+}
 
 try
 {
@@ -94,4 +105,48 @@ catch (Exception ex)
 finally
 {
     Log.CloseAndFlush();
+}
+
+return 0;
+
+// Runs only the interactive Google OAuth consent (no web host / PLC connection) and exits.
+static async Task<int> RunGoogleAuthorizeAsync()
+{
+    var configuration = new ConfigurationBuilder()
+        .SetBasePath(Directory.GetCurrentDirectory())
+        .AddJsonFile("appsettings.json", optional: true)
+        .Build();
+
+    var options = new LoggerOptions();
+    configuration.GetSection(LoggerOptions.SectionName).Bind(options);
+
+    using var loggerFactory = LoggerFactory.Create(b => b.AddSerilog(Log.Logger));
+    var store = new ConfigStore(Options.Create(options), loggerFactory.CreateLogger<ConfigStore>());
+    var upload = store.GetUpload();
+
+    if (!upload.Provider.Equals("GoogleDrive", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine("Upload provider is not 'GoogleDrive'. Set the provider and credentials path "
+            + "on the Upload page first, then re-run with --authorize.");
+        return 1;
+    }
+
+    var provider = new GoogleDriveUploadProvider(
+        upload.GoogleDrive, loggerFactory.CreateLogger<GoogleDriveUploadProvider>());
+
+    Console.WriteLine("Opening your browser for Google sign-in — complete the consent there…");
+    try
+    {
+        await provider.AuthorizeInteractiveAsync();
+        var ok = await provider.TestConnectionAsync();
+        Console.WriteLine(ok
+            ? "Google Drive authorized. Restart the service (if running) and uploads will work."
+            : "Authorized, but the test connection failed — check network/credentials.");
+        return ok ? 0 : 2;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("Authorization failed: " + ex.Message);
+        return 1;
+    }
 }

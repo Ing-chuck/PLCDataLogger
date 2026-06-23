@@ -48,7 +48,9 @@
     {
         <p class="muted small">
             Connecting opens a browser on this machine to grant access; the refresh token is then
-            stored encrypted (DPAPI). This must be done once during setup.
+            stored encrypted (DPAPI). Do this once during setup. When the logger runs as a Windows
+            Service it has no desktop, so instead run <code>PLCDataLogger.exe --authorize</code> from
+            a desktop session on this PC.
         </p>
     }
 </div>
@@ -96,6 +98,19 @@
     {
         _busy = true;
         _message = null;
+
+        // Running as a Windows Service (session 0) there is no desktop to open the consent browser,
+        // so the flow would hang. Direct the operator to the offline command instead.
+        if (Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService())
+        {
+            _ok = false;
+            _message = "This logger is running as a Windows Service, which has no desktop to open the "
+                + "sign-in browser. On this PC, open a desktop session and run "
+                + "\"PLCDataLogger.exe --authorize\" to complete Google sign-in.";
+            _busy = false;
+            return;
+        }
+
         try
         {
             Store.SetUpload(_form); // ensure paths are current before authorizing

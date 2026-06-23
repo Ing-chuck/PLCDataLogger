@@ -53,6 +53,18 @@ Open `http://localhost:5198/` on the PC and use the web UI (the primary configur
    > target PC after install (e.g. in a `secrets\` folder next to the exe) and point the Upload page
    > at it. The encrypted token the app then stores (`google_token\`) and the OPC UA certificate
    > store (`pki\`) are likewise per-machine and must stay on the site.
+
+   **Authorizing Google Drive on a service install.** The **Connect Google…** button can't open a
+   browser when the logger runs as a Windows Service (it has no desktop), so it will tell you to use
+   the command below instead. From a desktop session on the target PC, in the install folder:
+
+   ```powershell
+   .\PLCDataLogger.exe --authorize
+   ```
+
+   This opens the sign-in browser, stores the token (DPAPI, machine-bound), and exits — the running
+   service then picks it up (restart it if needed). The OAuth **client** JSON is the same across all
+   sites; only this one-time consent is per-machine.
 3. **Tuning** *(in `appsettings.json`, then restart the service)* — `Storage.RetentionDays`,
    `Export.DailyAtLocalTime`, and `Subscription.DefaultDeadband` (raise to cut volume from noisy
    analog tags).
