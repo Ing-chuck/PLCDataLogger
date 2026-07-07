@@ -44,7 +44,7 @@ public sealed class HealthSnapshot
 public sealed class HealthMonitor
 {
     private readonly ConcurrentDictionary<string, PlcHealth> _plcs = new();
-    private readonly LoggerOptions _options;
+    private readonly ConfigStore _config;
     private readonly ReadingBuffer _buffer;
     private readonly IReadingStore _db;
     private readonly UploadProviderResolver _providers;
@@ -53,12 +53,12 @@ public sealed class HealthMonitor
     private DateTime? _lastWriteUtc;
 
     public HealthMonitor(
-        IOptions<LoggerOptions> options,
+        ConfigStore config,
         ReadingBuffer buffer,
         IReadingStore db,
         UploadProviderResolver providers)
     {
-        _options = options.Value;
+        _config = config;
         _buffer = buffer;
         _db = db;
         _providers = providers;
@@ -114,7 +114,7 @@ public sealed class HealthMonitor
         {
             GeneratedUtc = DateTime.UtcNow,
             Version = BuildVersion,
-            SiteName = _options.SiteName,
+            SiteName = _config.GetSiteName(),
             Plcs = _plcs.Values.OrderBy(p => p.Name).ToList(),
             ReadingsWritten = written,
             LastWriteUtc = _lastWriteUtc,

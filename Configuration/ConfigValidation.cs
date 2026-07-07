@@ -37,16 +37,16 @@ public static class ConfigValidation
         return null;
     }
 
-    /// <summary>Validate the full effective configuration. PLCs and upload come from the runtime
-    /// config store; the rest from appsettings-bound options.</summary>
-    public static List<ConfigIssue> Validate(LoggerOptions options, IReadOnlyList<PlcOptions> plcs, UploadOptions upload)
+    /// <summary>Validate the full effective configuration. Site name, PLCs and upload come from the
+    /// runtime config store; the rest from appsettings-bound options.</summary>
+    public static List<ConfigIssue> Validate(LoggerOptions options, string siteName, IReadOnlyList<PlcOptions> plcs, UploadOptions upload)
     {
         var issues = new List<ConfigIssue>();
         void Error(string m) => issues.Add(new ConfigIssue(ConfigIssue.Error, m));
         void Warn(string m) => issues.Add(new ConfigIssue(ConfigIssue.Warning, m));
 
-        if (string.IsNullOrWhiteSpace(options.SiteName))
-            Warn("SiteName is empty — exports and the dashboard will be unlabeled.");
+        if (string.IsNullOrWhiteSpace(siteName))
+            Warn("Site name is empty — exports and the dashboard will be unlabeled. Set it on the Settings page.");
 
         // PLCs
         if (plcs.Count == 0)

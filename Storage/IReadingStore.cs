@@ -6,8 +6,11 @@ public sealed record DiscoveredTag(string NodeId, string Name);
 /// <summary>A subscribed tag: node id, its database id, and any per-tag deadband override.</summary>
 public sealed record TagBinding(string NodeId, int TagId, double? Deadband);
 
-/// <summary>An export file awaiting (or retrying) upload.</summary>
-public sealed record PendingUpload(long UploadLogId, string FileName, string FilePath, long MaxReadingId);
+/// <summary>A per-PLC export file whose contents have changed since the last successful upload.</summary>
+public sealed record PendingUpload(int PlcId, string FileName, string FilePath, long LastReadingId);
+
+/// <summary>A PLC that has logged readings, identified for per-PLC export.</summary>
+public sealed record LoggedPlc(int PlcId, string Name);
 
 /// <summary>One row streamed out for CSV export (timestamps as epoch-ms UTC).</summary>
 public sealed record ExportRow(
@@ -36,17 +39,31 @@ public interface IReadingStore
 
     void InsertReadings(IReadOnlyList<Reading> batch);
 
-    /// <summary>Stream readings with id greater than <paramref name="afterId"/>, ordered by id.</summary>
-    IEnumerable<ExportRow> ReadReadingsAfter(long afterId);
+    /// <summary>PLCs that currently have logged readings, for per-PLC export.</summary>
+    IReadOnlyList<LoggedPlc> GetLoggedPlcs();
 
-    long GetMaxExportedReadingId();
+    /// <summary>Stream all currently-retained readings for one PLC, ordered by id. The export is a
+    /// rolling snapshot of the local store, so it reflects whatever survives the retention window.</summary>
+    IEnumerable<ExportRow> ReadReadingsForPlc(int plcId);
+
+    /// <summary>Stream one PLC's readings whose source timestamp falls in [startMs, endMs], ordered by
+    /// id. Backs the on-demand windowed export.</summary>
+    IEnumerable<ExportRow> ReadReadingsForPlcRange(int plcId, long startMs, long endMs);
+
+    /// <summary>Write a consistent single-file snapshot of the whole database to <paramref name="destPath"/>
+    /// (via <c>VACUUM INTO</c>) — safe to run while logging continues. Used for the raw DB backup.</summary>
+    void BackupTo(string destPath);
+
+    /// <summary>Lowest reading id that every PLC's export file has been uploaded up to — the safe
+    /// pruning watermark, so retention never drops a reading that hasn't reached the cloud yet.</summary>
     long GetMaxUploadedReadingId();
 
-    long RecordExport(string fileName, string filePath, string? periodStart, string? periodEnd,
-        long maxReadingId, int rowCount);
+    /// <summary>Record that a PLC's export file was (re)written up to <paramref name="maxReadingId"/>.
+    /// Marks it pending upload when its contents advanced past the last uploaded point.</summary>
+    void RecordExport(int plcId, string fileName, string filePath, long maxReadingId, int rowCount);
     List<PendingUpload> GetPendingUploads();
-    void MarkUploaded(long uploadLogId);
-    void MarkUploadFailed(long uploadLogId);
+    void MarkUploaded(int plcId, long uploadedReadingId);
+    void MarkUploadFailed(int plcId);
 
     /// <summary>Prune readings older than the cutoff (optionally id-gated by upload watermark),
     /// reclaiming space. Returns the number of rows deleted.</summary>

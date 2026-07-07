@@ -56,10 +56,10 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
         }
     }
 
-    public string? GetLastExportedAt() => ScalarString("SELECT MAX(exported_at) FROM upload_log;");
+    public string? GetLastExportedAt() => ScalarString("SELECT MAX(exported_at) FROM export_state;");
 
     public string? GetLastUploadedAt() =>
-        ScalarString("SELECT MAX(uploaded_at) FROM upload_log WHERE status = 'Uploaded';");
+        ScalarString("SELECT MAX(uploaded_at) FROM export_state WHERE uploaded_at IS NOT NULL;");
 
     public int UpsertPlc(string name, string endpointUrl, string securityPolicy)
     {
@@ -178,21 +178,57 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
         }
     }
 
-    public IEnumerable<ExportRow> ReadReadingsAfter(long afterId)
+    public IReadOnlyList<LoggedPlc> GetLoggedPlcs()
+    {
+        lock (_gate)
+        {
+            var list = new List<LoggedPlc>();
+            using var cmd = Conn.CreateCommand();
+            // Only PLCs that actually have tags — a configured-but-never-discovered PLC has
+            // nothing to export.
+            cmd.CommandText = """
+                SELECT p.plc_id, p.name
+                FROM plcs p
+                WHERE EXISTS (SELECT 1 FROM tags t WHERE t.plc_id = p.plc_id)
+                ORDER BY p.name;
+                """;
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                list.Add(new LoggedPlc(reader.GetInt32(0), reader.GetString(1)));
+            return list;
+        }
+    }
+
+    public IEnumerable<ExportRow> ReadReadingsForPlc(int plcId) =>
+        StreamReadings(
+            "WHERE t.plc_id = $plcId",
+            cmd => cmd.Parameters.AddWithValue("$plcId", plcId));
+
+    public IEnumerable<ExportRow> ReadReadingsForPlcRange(int plcId, long startMs, long endMs) =>
+        StreamReadings(
+            "WHERE t.plc_id = $plcId AND r.ts_utc BETWEEN $start AND $end",
+            cmd =>
+            {
+                cmd.Parameters.AddWithValue("$plcId", plcId);
+                cmd.Parameters.AddWithValue("$start", startMs);
+                cmd.Parameters.AddWithValue("$end", endMs);
+            });
+
+    private IEnumerable<ExportRow> StreamReadings(string whereClause, Action<SqliteCommand> bind)
     {
         // Separate read-only connection: WAL lets this stream concurrently with the writer.
         using var conn = new SqliteConnection($"Data Source={PrimaryPath};Mode=ReadOnly");
         conn.Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             SELECT r.id, r.ts_utc, p.name, t.tag_name, r.value, r.value_text, r.quality
             FROM readings r
             JOIN tags t ON t.tag_id = r.tag_id
             JOIN plcs p ON p.plc_id = t.plc_id
-            WHERE r.id > $afterId
+            {whereClause}
             ORDER BY r.id;
             """;
-        cmd.Parameters.AddWithValue("$afterId", afterId);
+        bind(cmd);
 
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
@@ -208,6 +244,26 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
         }
     }
 
+    public void BackupTo(string destPath)
+    {
+        var dir = Path.GetDirectoryName(destPath);
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
+
+        // VACUUM INTO produces a consistent, compact single-file snapshot (no -wal/-shm sidecars)
+        // even while the writer keeps logging. Serialize against the writer lock; the target must
+        // not already exist.
+        lock (_gate)
+        {
+            if (File.Exists(destPath))
+                File.Delete(destPath);
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = "VACUUM INTO $dest;";
+            cmd.Parameters.AddWithValue("$dest", destPath);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
     public void SetTagDataType(int tagId, string dataType)
     {
         lock (_gate)
@@ -220,31 +276,39 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
         }
     }
 
-    public long GetMaxExportedReadingId() => ScalarLong("SELECT MAX(max_reading_id) FROM upload_log;");
-
+    // Safe pruning watermark: the lowest point every logged PLC's file has been uploaded up to.
+    // If any PLC has never uploaded (uploaded_reading_id = 0), this is 0 and retention holds off.
     public long GetMaxUploadedReadingId() =>
-        ScalarLong("SELECT MAX(max_reading_id) FROM upload_log WHERE status = 'Uploaded';");
+        ScalarLong("SELECT COALESCE(MIN(uploaded_reading_id), 0) FROM export_state;");
 
-    public long RecordExport(string fileName, string filePath, string? periodStart, string? periodEnd,
-        long maxReadingId, int rowCount)
+    public void RecordExport(int plcId, string fileName, string filePath, long maxReadingId, int rowCount)
     {
         lock (_gate)
         {
             using var cmd = Conn.CreateCommand();
+            // Upsert the PLC's export row. Reset status to 'Pending' whenever the file advanced past
+            // what was last uploaded, so the upload step knows there's a fresh copy to push.
             cmd.CommandText = """
-                INSERT INTO upload_log
-                    (file_name, file_path, period_start, period_end, max_reading_id, row_count, exported_at, status)
-                VALUES ($name, $path, $ps, $pe, $maxId, $rows, $now, 'Exported')
-                RETURNING id;
+                INSERT INTO export_state
+                    (plc_id, file_name, file_path, last_reading_id, row_count, exported_at, status)
+                VALUES ($plc, $name, $path, $maxId, $rows, $now,
+                    CASE WHEN $maxId > 0 THEN 'Pending' ELSE 'Uploaded' END)
+                ON CONFLICT(plc_id) DO UPDATE SET
+                    file_name       = excluded.file_name,
+                    file_path       = excluded.file_path,
+                    last_reading_id = excluded.last_reading_id,
+                    row_count       = excluded.row_count,
+                    exported_at     = excluded.exported_at,
+                    status          = CASE WHEN excluded.last_reading_id > export_state.uploaded_reading_id
+                                           THEN 'Pending' ELSE export_state.status END;
                 """;
+            cmd.Parameters.AddWithValue("$plc", plcId);
             cmd.Parameters.AddWithValue("$name", fileName);
             cmd.Parameters.AddWithValue("$path", filePath);
-            cmd.Parameters.AddWithValue("$ps", (object?)periodStart ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$pe", (object?)periodEnd ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$maxId", maxReadingId);
             cmd.Parameters.AddWithValue("$rows", rowCount);
             cmd.Parameters.AddWithValue("$now", IsoNow());
-            return Convert.ToInt64(cmd.ExecuteScalar());
+            cmd.ExecuteNonQuery();
         }
     }
 
@@ -254,34 +318,45 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
         {
             var list = new List<PendingUpload>();
             using var cmd = Conn.CreateCommand();
-            cmd.CommandText =
-                "SELECT id, file_name, file_path, max_reading_id FROM upload_log WHERE status <> 'Uploaded' ORDER BY id;";
+            // A file needs (re)uploading whenever its contents advanced beyond the last upload,
+            // or a previous upload failed.
+            cmd.CommandText = """
+                SELECT plc_id, file_name, file_path, last_reading_id
+                FROM export_state
+                WHERE last_reading_id > uploaded_reading_id OR status = 'UploadFailed'
+                ORDER BY plc_id;
+                """;
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
-                list.Add(new PendingUpload(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3)));
+                list.Add(new PendingUpload(reader.GetInt32(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3)));
             return list;
         }
     }
 
-    public void MarkUploaded(long uploadLogId)
+    public void MarkUploaded(int plcId, long uploadedReadingId)
     {
         lock (_gate)
         {
             using var cmd = Conn.CreateCommand();
-            cmd.CommandText = "UPDATE upload_log SET status = 'Uploaded', uploaded_at = $now WHERE id = $id;";
+            cmd.CommandText = """
+                UPDATE export_state
+                SET status = 'Uploaded', uploaded_reading_id = $rid, uploaded_at = $now
+                WHERE plc_id = $plc;
+                """;
+            cmd.Parameters.AddWithValue("$rid", uploadedReadingId);
             cmd.Parameters.AddWithValue("$now", IsoNow());
-            cmd.Parameters.AddWithValue("$id", uploadLogId);
+            cmd.Parameters.AddWithValue("$plc", plcId);
             cmd.ExecuteNonQuery();
         }
     }
 
-    public void MarkUploadFailed(long uploadLogId)
+    public void MarkUploadFailed(int plcId)
     {
         lock (_gate)
         {
             using var cmd = Conn.CreateCommand();
-            cmd.CommandText = "UPDATE upload_log SET status = 'UploadFailed' WHERE id = $id AND status <> 'Uploaded';";
-            cmd.Parameters.AddWithValue("$id", uploadLogId);
+            cmd.CommandText = "UPDATE export_state SET status = 'UploadFailed' WHERE plc_id = $plc;";
+            cmd.Parameters.AddWithValue("$plc", plcId);
             cmd.ExecuteNonQuery();
         }
     }
@@ -409,17 +484,20 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
 
         CREATE INDEX IF NOT EXISTS idx_readings_tag_ts ON readings(tag_id, ts_utc);
 
-        CREATE TABLE IF NOT EXISTS upload_log (
-            id             INTEGER PRIMARY KEY,
-            file_name      TEXT NOT NULL,
-            file_path      TEXT NOT NULL,
-            period_start   TEXT,
-            period_end     TEXT,
-            max_reading_id INTEGER NOT NULL,
-            row_count      INTEGER NOT NULL,
-            exported_at    TEXT NOT NULL,
-            uploaded_at    TEXT,
-            status         TEXT NOT NULL        -- Exported | Uploaded | UploadFailed
+        -- One row per PLC: the current state of its single rolling export file
+        -- ({SiteName}-{PlcName}.csv). The file is overwritten each run from the retained
+        -- readings and re-uploaded (overwriting the cloud copy), so we track only the latest
+        -- exported/uploaded reading id rather than a log of one-shot files.
+        CREATE TABLE IF NOT EXISTS export_state (
+            plc_id              INTEGER PRIMARY KEY REFERENCES plcs(plc_id),
+            file_name           TEXT NOT NULL,
+            file_path           TEXT NOT NULL,
+            last_reading_id     INTEGER NOT NULL DEFAULT 0,  -- max id written to the file
+            row_count           INTEGER NOT NULL DEFAULT 0,
+            exported_at         TEXT,
+            uploaded_reading_id INTEGER NOT NULL DEFAULT 0,  -- max id confirmed uploaded
+            uploaded_at         TEXT,
+            status              TEXT NOT NULL DEFAULT 'Pending' -- Pending | Uploaded | UploadFailed
         );
 
         CREATE TABLE IF NOT EXISTS settings (

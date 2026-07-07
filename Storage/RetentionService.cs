@@ -16,17 +16,20 @@ namespace PlcDataLogger.Storage;
 public sealed class RetentionService : BackgroundService
 {
     private readonly LoggerOptions _options;
+    private readonly ConfigStore _config;
     private readonly IReadingStore _db;
     private readonly UploadProviderResolver _providers;
     private readonly ILogger<RetentionService> _log;
 
     public RetentionService(
         IOptions<LoggerOptions> options,
+        ConfigStore config,
         IReadingStore db,
         UploadProviderResolver providers,
         ILogger<RetentionService> log)
     {
         _options = options.Value;
+        _config = config;
         _db = db;
         _providers = providers;
         _log = log;
@@ -35,7 +38,7 @@ public sealed class RetentionService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var interval = TimeSpan.FromMinutes(Math.Max(1, _options.Storage.RetentionCheckIntervalMinutes));
-        _log.LogInformation("Retention service started (keep {Days} days).", _options.Storage.RetentionDays);
+        _log.LogInformation("Retention service started (keep {Days} days).", _config.GetRetentionDays());
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -57,10 +60,11 @@ public sealed class RetentionService : BackgroundService
 
     private void Sweep(bool uploadEnabled)
     {
-        if (_options.Storage.RetentionDays <= 0)
+        var retentionDays = _config.GetRetentionDays();
+        if (retentionDays <= 0)
             return; // retention disabled — keep everything
 
-        var cutoff = DateTime.UtcNow.AddDays(-_options.Storage.RetentionDays);
+        var cutoff = DateTime.UtcNow.AddDays(-retentionDays);
 
         long? watermark = null;
         if (uploadEnabled)

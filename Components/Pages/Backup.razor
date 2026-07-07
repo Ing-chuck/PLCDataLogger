@@ -1,0 +1,99 @@
+@page "/backup"
+@using PlcDataLogger.Export
+@inject ExportRunner Runner
+
+<h1>Backup &amp; Export</h1>
+<p class="sub">One-off exports and raw database backups, in addition to the scheduled upload cycle.</p>
+
+<div class="form">
+    <h2 class="section">Export a time window</h2>
+    <p class="muted small">
+        Writes a separate, uniquely-named CSV per PLC for the chosen range
+        (<code>{Site}-{PLC}-{start}_{end}.csv</code>) and uploads it. Does not affect the rolling
+        daily files.
+    </p>
+    <label>From (local)
+        <input type="datetime-local" @bind="_start" />
+    </label>
+    <label>To (local)
+        <input type="datetime-local" @bind="_end" />
+    </label>
+    <div class="actions">
+        <button class="btn primary" @onclick="ExportRange" disabled="@_busy">
+            @(_busy ? "Working…" : "Export window")
+        </button>
+    </div>
+    @if (_rangeMessage is not null)
+    {
+        <p class="@(_rangeOk ? "ok-msg" : "err")">@_rangeMessage</p>
+    }
+
+    <hr class="sep" />
+
+    <h2 class="section">Back up the database</h2>
+    <p class="muted small">
+        Uploads a consistent snapshot of the whole SQLite database as
+        <code>{Site}-backup-{timestamp}.db</code> (no CSV conversion). Each backup is a new
+        timestamped file, so a history is kept.
+    </p>
+    <div class="actions">
+        <button class="btn primary" @onclick="BackupDatabase" disabled="@_busy">
+            @(_busy ? "Working…" : "Back up database now")
+        </button>
+    </div>
+    @if (_backupMessage is not null)
+    {
+        <p class="@(_backupOk ? "ok-msg" : "err")">@_backupMessage</p>
+    }
+</div>
+
+<style>
+    .section { font-size: 1.05rem; margin: 4px 0 6px; }
+    .sep { border: none; border-top: 1px solid #2a2f3a; margin: 24px 0; }
+</style>
+
+@code {
+    private DateTime _start = DateTime.Now.Date.AddDays(-1);
+    private DateTime _end = DateTime.Now;
+    private bool _busy;
+    private bool _rangeOk, _backupOk;
+    private string? _rangeMessage, _backupMessage;
+
+    private async Task ExportRange()
+    {
+        _busy = true;
+        _rangeMessage = null;
+        try
+        {
+            var startUtc = DateTime.SpecifyKind(_start, DateTimeKind.Local).ToUniversalTime();
+            var endUtc = DateTime.SpecifyKind(_end, DateTimeKind.Local).ToUniversalTime();
+            var result = await Runner.RunRangeExportAsync(startUtc, endUtc);
+            _rangeOk = result.FailedUploads == 0 && result.ExportedRows > 0;
+            _rangeMessage = result.Message;
+        }
+        catch (Exception ex)
+        {
+            _rangeOk = false;
+            _rangeMessage = "Failed: " + ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task BackupDatabase()
+    {
+        _busy = true;
+        _backupMessage = null;
+        try
+        {
+            var result = await Runner.RunDatabaseBackupAsync();
+            _backupOk = result.FailedUploads == 0;
+            _backupMessage = result.Message;
+        }
+        catch (Exception ex)
+        {
+            _backupOk = false;
+            _backupMessage = "Failed: " + ex.Message;
+        }
+        finally { _busy = false; }
+    }
+}

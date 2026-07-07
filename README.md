@@ -232,16 +232,33 @@ To remove the service (leaving the install directory and data in place):
 
 ## Export, upload & retention
 
-**CSV export.** Once a day (`Export.DailyAtLocalTime`) the logger writes all readings recorded
-since the last export to a long-format CSV in `Export.DirectoryPath` — one row per reading:
-`timestamp_utc, plc_name, tag_name, value, quality`. Each export is recorded in the `upload_log`
-table with the id range and row count. The export always runs, even with no internet, because the
-files are useful for manual pickup (USB/RDP). Set `Export.RunOnStartup: true` to verify it without
-waiting for the scheduled time.
+**CSV export.** On the configured schedule the logger regenerates **one rolling CSV per PLC** in
+`Export.DirectoryPath`, named `{SiteName}-{PlcName}.csv` (site name is set on the Settings page). Each
+file is overwritten from the readings still in the local store — a long-format snapshot, one row per
+reading: `timestamp_utc, plc_name, tag_name, value, quality`. Because the file mirrors the retained
+window, rows aged out by retention drop off it too. Per-PLC state (last exported/uploaded reading id)
+lives in the `export_state` table. The export always runs, even with no internet, because the files
+are useful for manual pickup (USB/RDP). Set `Export.RunOnStartup: true` to verify it without waiting
+for the scheduled time.
 
-**Cloud upload (pluggable).** After exporting, any not-yet-uploaded files are sent via the
-configured `ICloudUploadProvider`. Upload runs entirely off the logging hot path: failures are
-retried on the next cycle and never slow down or block recording.
+**Schedule.** The export+upload cadence is set on the **Settings** page — either _every N minutes_ or
+_daily at a fixed local time_. Changes take effect immediately (the scheduler re-plans without a
+restart). `Export.DailyAtLocalTime` in appsettings seeds the initial value.
+
+
+**One-off windowed export.** The **Backup** page can export an arbitrary time range to its own
+uniquely-named file per PLC (`{SiteName}-{PlcName}-{start}_{end}.csv`) and upload it, independent of
+the rolling daily files — handy for pulling a specific incident window for analysis.
+
+**Raw database backup.** The **Backup** page can also upload a consistent single-file snapshot of the
+whole SQLite database (via `VACUUM INTO`, safe while logging continues) as a timestamped
+`{SiteName}-backup-{timestamp}.db` — no CSV conversion, so it can be opened directly. Each backup is a
+new file, keeping a history in the cloud.
+
+**Cloud upload (pluggable).** After exporting, each PLC file whose contents changed since its last
+successful upload is re-sent via the configured `ICloudUploadProvider`, **overwriting the same
+destination file** rather than accumulating dated copies. Upload runs entirely off the logging hot
+path: failures are retried on the next cycle and never slow down or block recording.
 
 - **`None`** (default) — does nothing and is a fully supported permanent state for offline sites.
 - **`GoogleDrive`** — uploads to a Drive folder. Authentication uses OAuth with the refresh token
@@ -254,8 +271,9 @@ retried on the next cycle and never slow down or block recording.
   > Because consent needs a browser, do it while running interactively — a LocalSystem service has
   > no desktop; the DPAPI (LocalMachine) token it stores is then readable by the service.
 
-**Retention.** A periodic sweep (`Storage.RetentionCheckIntervalMinutes`) prunes readings older
-than `Storage.RetentionDays`, in one of two modes:
+**Retention.** A periodic sweep (`Storage.RetentionCheckIntervalMinutes`) prunes readings older than
+the retention window (set on the **Settings** page; `Storage.RetentionDays` seeds it), in one of two
+modes:
 
 - **Upload enabled** (a real provider) — only prune old readings that have been _confirmed
   uploaded_; un-uploaded data is never dropped.
@@ -274,6 +292,8 @@ service (§11). Browse to `http://localhost:5198/`.
 | **PLCs** | Add / edit / remove PLC connections. Changes apply **live** — sessions are added, removed, or reconnected without a service restart (§5). |
 | **Scan** | Discover OPC UA servers on the local subnet (TCP 4840 sweep + FindServers enrichment) and add one as a PLC with one click. |
 | **Upload** | Choose the cloud provider, edit its settings (with a **Browse…** server-side file/folder picker for the credentials/token paths), test the connection, and run the Google OAuth consent. |
+| **Backup** | Export an arbitrary **time window** to a one-off per-PLC CSV, or upload a **raw SQLite database backup** (`VACUUM INTO` snapshot) — both on demand. |
+| **Settings** | Set the **site name** (labels the dashboard and export files), the **upload schedule** (interval or daily time), and the **retention window** (days of readings to keep). |
 
 Editable configuration (PLC connections and upload settings) is stored in `config.local.json`
 next to the executable — seeded from `appsettings.json` on first run, then owned by the UI.

@@ -140,7 +140,7 @@
     }
 
     private void RefreshIssues() =>
-        _issues = ConfigValidation.Validate(Options.Value, Store.GetPlcs(), Store.GetUpload());
+        _issues = ConfigValidation.Validate(Options.Value, Store.GetSiteName(), Store.GetPlcs(), Store.GetUpload());
 
     private async Task ExportNow()
     {

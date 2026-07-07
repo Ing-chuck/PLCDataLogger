@@ -27,7 +27,7 @@ public sealed class StartupValidationService : IHostedService
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        var issues = ConfigValidation.Validate(_options, _configStore.GetPlcs(), _configStore.GetUpload());
+        var issues = ConfigValidation.Validate(_options, _configStore.GetSiteName(), _configStore.GetPlcs(), _configStore.GetUpload());
 
         var errors = issues.Count(i => i.IsError);
         var warnings = issues.Count - errors;

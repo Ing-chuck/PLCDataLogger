@@ -92,7 +92,7 @@ try
     app.MapDelete("/api/plcs/{name}", (string name, ConfigStore store) => { store.RemovePlc(name); return Results.Ok(); });
     app.MapPost("/api/export-now", (ExportRunner runner, CancellationToken ct) => runner.RunOnceAsync(ct));
     app.MapGet("/api/config/validate", (IOptions<LoggerOptions> opts, ConfigStore store) =>
-        ConfigValidation.Validate(opts.Value, store.GetPlcs(), store.GetUpload()));
+        ConfigValidation.Validate(opts.Value, store.GetSiteName(), store.GetPlcs(), store.GetUpload()));
 
     app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 

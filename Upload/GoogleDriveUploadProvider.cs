@@ -13,8 +13,9 @@ namespace PlcDataLogger.Upload;
 /// service only ever refreshes a previously-stored token silently — the one-time interactive
 /// consent is performed by <see cref="AuthorizeInteractiveAsync"/> (wired into the Phase 4 setup UI).
 ///
-/// NOTE: implemented but not yet end-to-end tested — requires a Google Cloud OAuth client and a
-/// completed consent. The default provider is "None"; enable via Upload:Provider = "GoogleDrive".
+/// Each PLC has one rolling export file that is re-uploaded every cycle; the upload overwrites the
+/// existing same-named Drive file (via <c>Files.Update</c>) instead of creating dated duplicates.
+/// The default provider is "None"; enable via Upload:Provider = "GoogleDrive".
 /// </summary>
 public sealed class GoogleDriveUploadProvider : ICloudUploadProvider
 {
@@ -60,20 +61,59 @@ public sealed class GoogleDriveUploadProvider : ICloudUploadProvider
     {
         var service = await EnsureServiceAsync(ct).ConfigureAwait(false);
         var folderId = await EnsureFolderAsync(service, destinationPath, ct).ConfigureAwait(false);
+        var fileName = Path.GetFileName(localFilePath);
 
-        var metadata = new DriveFile
-        {
-            Name = Path.GetFileName(localFilePath),
-            Parents = folderId is null ? null : new[] { folderId },
-        };
+        // The logger keeps one rolling file per PLC and re-uploads it each cycle, so overwrite the
+        // existing Drive file (update its content) instead of piling up dated duplicates.
+        var existingId = await FindFileIdAsync(service, folderId, fileName, ct).ConfigureAwait(false);
+        var contentType = ContentTypeFor(fileName);
 
         await using var fs = File.OpenRead(localFilePath);
-        var request = service.Files.Create(metadata, fs, "text/csv");
-        request.Fields = "id";
-        var progress = await request.UploadAsync(ct).ConfigureAwait(false);
+        Google.Apis.Upload.IUploadProgress progress;
+        if (existingId is null)
+        {
+            _log.LogInformation("Creating Drive file {Name}.", fileName);
+            var metadata = new DriveFile
+            {
+                Name = fileName,
+                Parents = folderId is null ? null : new[] { folderId },
+            };
+            var create = service.Files.Create(metadata, fs, contentType);
+            create.Fields = "id";
+            progress = await create.UploadAsync(ct).ConfigureAwait(false);
+        }
+        else
+        {
+            _log.LogInformation("Overwriting existing Drive file {Name} ({Id}).", fileName, existingId);
+            // Update content only — don't resend Parents/Name (Drive rejects re-parenting here).
+            var update = service.Files.Update(new DriveFile(), existingId, fs, contentType);
+            update.Fields = "id";
+            progress = await update.UploadAsync(ct).ConfigureAwait(false);
+        }
 
         if (progress.Status != Google.Apis.Upload.UploadStatus.Completed)
             throw progress.Exception ?? new InvalidOperationException("Google Drive upload did not complete.");
+    }
+
+    private static string ContentTypeFor(string fileName) =>
+        Path.GetExtension(fileName).ToLowerInvariant() switch
+        {
+            ".csv" => "text/csv",
+            ".db" or ".sqlite" => "application/x-sqlite3",
+            _ => "application/octet-stream",
+        };
+
+    private static async Task<string?> FindFileIdAsync(DriveService service, string? folderId, string fileName, CancellationToken ct)
+    {
+        var list = service.Files.List();
+        var escapedName = fileName.Replace("\\", "\\\\").Replace("'", "\\'");
+        list.Q = folderId is null
+            ? $"name = '{escapedName}' and trashed = false"
+            : $"'{folderId}' in parents and name = '{escapedName}' and trashed = false";
+        list.Fields = "files(id)";
+        list.PageSize = 1;
+        var existing = await list.ExecuteAsync(ct).ConfigureAwait(false);
+        return existing.Files is { Count: > 0 } ? existing.Files[0].Id : null;
     }
 
     /// <summary>One-time interactive consent (opens a browser). Intended for the setup UI, not
