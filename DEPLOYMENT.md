@@ -65,12 +65,16 @@ Open `http://localhost:5198/` on the PC and use the web UI (the primary configur
    This opens the sign-in browser, stores the token (DPAPI, machine-bound), and exits — the running
    service then picks it up (restart it if needed). The OAuth **client** JSON is the same across all
    sites; only this one-time consent is per-machine.
-3. **Tuning** *(in `appsettings.json`, then restart the service)* — `Storage.RetentionDays`,
-   `Export.DailyAtLocalTime`, and `Subscription.DefaultDeadband` (raise to cut volume from noisy
-   analog tags).
+3. **Settings** — set the **site name** (labels the dashboard and export files), the **upload
+   schedule** (every N minutes or daily at a time), and the **retention window** (days to keep).
+   Applied live, no restart.
+4. **Backup** *(optional, on demand)* — export an arbitrary **time window** to a one-off per-PLC CSV,
+   or upload a **raw SQLite database backup** (`VACUUM INTO` snapshot).
+5. **Deeper tuning** *(in `appsettings.json`, then restart the service)* — `Subscription.DefaultDeadband`
+   (raise to cut volume from noisy analog tags), discovery filter, and check intervals.
 
-Per-site settings live in two files next to the exe: `appsettings.json` (static defaults) and
-`config.local.json` (PLCs + upload, written by the UI).
+Per-site settings live in two files next to the exe: `appsettings.json` (static seed defaults) and
+`config.local.json` (site name, schedule, retention, PLCs + upload — written by the UI).
 
 ## 5. Verify
 

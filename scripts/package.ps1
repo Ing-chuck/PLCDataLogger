@@ -44,7 +44,7 @@ if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit $LASTEXITCODE)." }
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts') | Out-Null
 Copy-Item (Join-Path $PSScriptRoot 'install-service.ps1')   (Join-Path $stage 'scripts') -Force
 Copy-Item (Join-Path $PSScriptRoot 'uninstall-service.ps1') (Join-Path $stage 'scripts') -Force
-foreach ($doc in @('DEPLOYMENT.md', 'README.md')) {
+foreach ($doc in @('COMMISSIONING.md', 'DEPLOYMENT.md', 'README.md')) {
     $src = Join-Path $root $doc
     if (Test-Path $src) { Copy-Item $src $stage -Force }
 }

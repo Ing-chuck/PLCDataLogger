@@ -24,6 +24,9 @@ config.local.json
 # Packaging output
 dist/
 
+# Local Grafana dashboards + site DB snapshots used with them (never committed)
+dashboards/
+
 # User-specific files
 *.rsuser
 *.suo
