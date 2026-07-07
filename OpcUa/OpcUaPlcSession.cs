@@ -255,8 +255,27 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
             if (reference.NodeClass == NodeClass.Variable
                 && _filter.IncludeVariable(nodeId)
                 && seenTags.Add(nodeId.ToString()))
-                tags.Add(new DiscoveredTag(nodeId.ToString(), name));
+                tags.Add(new DiscoveredTag(nodeId.ToString(), DeriveTagName(nodeId, name)));
         }
+    }
+
+    /// <summary>
+    /// Derives a hierarchical tag name from a Codesys symbolic node id, preserving the path
+    /// below the PLC application root so that instances of the same function block stay distinct
+    /// (e.g. <c>GLOBALES.fb_BREC1.CargaPrueba</c> vs <c>GLOBALES.fb_BREC2.CargaPrueba</c> instead of
+    /// both collapsing to <c>CargaPrueba</c>). Falls back to the browse display name when the node
+    /// identifier is not a Codesys-style symbolic string carrying an ".Application." segment.
+    /// </summary>
+    private static string DeriveTagName(NodeId nodeId, string leafName)
+    {
+        const string marker = ".Application.";
+        if (nodeId.Identifier is string symbolic && symbolic.Length > 0)
+        {
+            int idx = symbolic.IndexOf(marker, StringComparison.Ordinal);
+            if (idx >= 0)
+                return symbolic[(idx + marker.Length)..];
+        }
+        return leafName;
     }
 
     private void OnNotification(MonitoredItem item, MonitoredItemNotificationEventArgs e)
