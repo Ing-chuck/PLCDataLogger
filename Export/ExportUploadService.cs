@@ -7,11 +7,12 @@ using PlcDataLogger.Configuration;
 namespace PlcDataLogger.Export;
 
 /// <summary>
-/// Scheduled job (§5) that runs the export-then-upload pass via <see cref="ExportRunner"/> on the
-/// cadence configured in the web UI — either a fixed interval or once a day at a local time. The
-/// export always runs — even with the "None" provider — because the CSV files are useful for manual
-/// pickup. Upload failures are retried on the next cycle and never affect local logging. A schedule
-/// change (via <see cref="ConfigStore"/>) wakes the loop immediately to re-plan the next run.
+/// Scheduled job (§5) that uploads a single, overwritten database backup via
+/// <see cref="ExportRunner.RunScheduledUploadAsync"/> on the cadence configured in the web UI —
+/// either a fixed interval or once a day at a local time. The backup always runs — even with the
+/// "None" provider — so a fresh local snapshot exists for manual pickup. Upload failures are retried
+/// on the next cycle and never affect local logging. A schedule change (via <see cref="ConfigStore"/>)
+/// wakes the loop immediately to re-plan the next run.
 /// </summary>
 public sealed class ExportUploadService : BackgroundService
 {
@@ -45,14 +46,14 @@ public sealed class ExportUploadService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _log.LogInformation("Export service started ({Schedule}).", Describe(_config.GetSchedule()));
+        _log.LogInformation("Backup/upload service started ({Schedule}).", Describe(_config.GetSchedule()));
 
         if (_export.RunOnStartup)
         {
             try
             {
                 await Task.Delay(StartupDelay, stoppingToken).ConfigureAwait(false);
-                await _runner.RunOnceAsync(stoppingToken).ConfigureAwait(false);
+                await _runner.RunScheduledUploadAsync(stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { return; }
         }
@@ -61,25 +62,25 @@ public sealed class ExportUploadService : BackgroundService
         {
             var schedule = _config.GetSchedule();
             var delay = TimeUntilNext(schedule, DateTime.Now);
-            _log.LogInformation("Next export in {Hours:F1} h ({Schedule}).", delay.TotalHours, Describe(schedule));
+            _log.LogInformation("Next backup upload in {Hours:F1} h ({Schedule}).", delay.TotalHours, Describe(schedule));
 
             // Wake on either the timer or a config change, whichever comes first.
             var reloaded = await DelayOrReload(delay, stoppingToken).ConfigureAwait(false);
             if (stoppingToken.IsCancellationRequested) break;
             if (reloaded)
             {
-                _log.LogInformation("Schedule changed; re-planning next export.");
+                _log.LogInformation("Schedule changed; re-planning next backup upload.");
                 continue;
             }
 
             try
             {
-                await _runner.RunOnceAsync(stoppingToken).ConfigureAwait(false);
+                await _runner.RunScheduledUploadAsync(stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                _log.LogError(ex, "Export/upload cycle failed; will retry on next schedule.");
+                _log.LogError(ex, "Backup/upload cycle failed; will retry on next schedule.");
             }
         }
     }

@@ -3,7 +3,10 @@
 @inject ExportRunner Runner
 
 <h1>Backup &amp; Export</h1>
-<p class="sub">One-off exports and raw database backups, in addition to the scheduled upload cycle.</p>
+<p class="sub">
+    The scheduled cloud upload is a single, overwritten database backup (<code>{Site}-backup.db</code>).
+    These are additional on-demand actions.
+</p>
 
 <div class="form">
     <h2 class="section">Export a time window</h2>
@@ -30,11 +33,29 @@
 
     <hr class="sep" />
 
+    <h2 class="section">Export all tags to CSV</h2>
+    <p class="muted small">
+        Regenerates the rolling <code>{Site}-{PLC}.csv</code> file per PLC from the retained readings
+        and uploads it (overwriting the same file). This is the CSV option — it is no longer part of
+        the scheduled cycle.
+    </p>
+    <div class="actions">
+        <button class="btn primary" @onclick="ExportCsv" disabled="@_busy">
+            @(_busy ? "Working…" : "Export CSV now")
+        </button>
+    </div>
+    @if (_csvMessage is not null)
+    {
+        <p class="@(_csvOk ? "ok-msg" : "err")">@_csvMessage</p>
+    }
+
+    <hr class="sep" />
+
     <h2 class="section">Back up the database</h2>
     <p class="muted small">
         Uploads a consistent snapshot of the whole SQLite database as
-        <code>{Site}-backup-{timestamp}.db</code> (no CSV conversion). Each backup is a new
-        timestamped file, so a history is kept.
+        <code>{Site}-backup-{timestamp}.db</code> — a <em>timestamped archive</em> kept alongside the
+        single rolling <code>{Site}-backup.db</code> that the schedule maintains.
     </p>
     <div class="actions">
         <button class="btn primary" @onclick="BackupDatabase" disabled="@_busy">
@@ -56,8 +77,8 @@
     private DateTime _start = DateTime.Now.Date.AddDays(-1);
     private DateTime _end = DateTime.Now;
     private bool _busy;
-    private bool _rangeOk, _backupOk;
-    private string? _rangeMessage, _backupMessage;
+    private bool _rangeOk, _csvOk, _backupOk;
+    private string? _rangeMessage, _csvMessage, _backupMessage;
 
     private async Task ExportRange()
     {
@@ -75,6 +96,24 @@
         {
             _rangeOk = false;
             _rangeMessage = "Failed: " + ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task ExportCsv()
+    {
+        _busy = true;
+        _csvMessage = null;
+        try
+        {
+            var result = await Runner.RunOnceAsync();
+            _csvOk = result.FailedUploads == 0;
+            _csvMessage = result.Message;
+        }
+        catch (Exception ex)
+        {
+            _csvOk = false;
+            _csvMessage = "Failed: " + ex.Message;
         }
         finally { _busy = false; }
     }

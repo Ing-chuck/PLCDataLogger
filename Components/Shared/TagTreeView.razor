@@ -1,0 +1,64 @@
+@* Recursive tag-tree node. A shared HashSet<int> holds the selected leaf tag ids; a Version
+   parameter is bumped by the page on every change to force this recursive tree to re-render
+   (child components are otherwise skipped when their by-reference parameters are unchanged). *@
+
+@if (Node.IsLeaf)
+{
+    <label class="tt-leaf">
+        <input type="checkbox" checked="@Selected.Contains(Node.TagId!.Value)"
+               @onchange="e => ToggleAsync((bool)e.Value!)" />
+        <span>@Node.Name</span>
+    </label>
+}
+else
+{
+    <div class="tt-folder">
+        <span class="tt-twisty" role="button" @onclick="() => Node.Expanded = !Node.Expanded">
+            @(Node.Expanded ? "▾" : "▸")
+        </span>
+        <label>
+            <input type="checkbox" checked="@AllSelected"
+                   @onchange="e => ToggleAsync((bool)e.Value!)" />
+            <span class="tt-name">@Node.Name</span>
+            <span class="tt-count @(AllSelected ? "" : (SelectedCount > 0 ? "partial" : "none"))">
+                @SelectedCount/@Node.LeafIds.Count
+            </span>
+        </label>
+    </div>
+    @if (Node.Expanded)
+    {
+        <div class="tt-children">
+            @foreach (var child in Node.Children)
+            {
+                <TagTreeView Node="child" Selected="Selected" Version="Version" OnChanged="OnChanged" />
+            }
+        </div>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public TagNode Node { get; set; } = default!;
+    [Parameter, EditorRequired] public HashSet<int> Selected { get; set; } = default!;
+
+    /// <summary>Bumped by the page on any change so the whole tree re-renders.</summary>
+    [Parameter] public int Version { get; set; }
+
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private bool AllSelected => Node.LeafIds.Count > 0 && Node.LeafIds.All(Selected.Contains);
+    private int SelectedCount => Node.LeafIds.Count(Selected.Contains);
+
+    private async Task ToggleAsync(bool value)
+    {
+        if (Node.IsLeaf)
+        {
+            if (value) Selected.Add(Node.TagId!.Value); else Selected.Remove(Node.TagId!.Value);
+        }
+        else
+        {
+            foreach (var id in Node.LeafIds)
+                if (value) Selected.Add(id); else Selected.Remove(id);
+        }
+        await OnChanged.InvokeAsync();
+    }
+}

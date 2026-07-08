@@ -10,9 +10,11 @@ namespace PlcDataLogger.Export;
 public sealed record ExportRunResult(int ExportedRows, int Uploaded, int FailedUploads, string Message);
 
 /// <summary>
-/// Performs a single export-then-upload pass (§5). Shared by the scheduled
-/// <see cref="ExportUploadService"/> and the on-demand "upload now" button / API. A semaphore
-/// guarantees only one run at a time, so a manual trigger can't overlap the scheduled job.
+/// Runs the export/backup + upload actions (§5). The scheduled <see cref="ExportUploadService"/>
+/// uploads a single, overwritten database backup (<see cref="RunScheduledUploadAsync"/>); CSV export
+/// (rolling <see cref="RunOnceAsync"/>, windowed <see cref="RunRangeExportAsync"/>) and timestamped
+/// backups (<see cref="RunDatabaseBackupAsync"/>) remain available on demand. A semaphore guarantees
+/// only one action runs at a time, so a manual trigger can't overlap the scheduled job.
 /// </summary>
 public sealed class ExportRunner
 {
@@ -40,6 +42,27 @@ public sealed class ExportRunner
         _log = log;
     }
 
+    /// <summary>
+    /// The scheduled action: upload a single, overwritten database backup (<c>{Site}-backup.db</c>) —
+    /// the whole SQLite store as one file, re-uploaded over the same cloud file each cycle. Advances
+    /// the retention watermark on success so old readings can be pruned once safely in the cloud.
+    /// </summary>
+    public async Task<ExportRunResult> RunScheduledUploadAsync(CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var fileName = $"{Sanitize(_config.GetSiteName())}-backup.db";
+            return await BackupAndUploadAsync(fileName, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>On-demand rolling CSV export + upload: one overwritten <c>{Site}-{Plc}.csv</c> per PLC
+    /// (kept as an option; no longer part of the scheduled cycle).</summary>
     public async Task<ExportRunResult> RunOnceAsync(CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -107,32 +130,44 @@ public sealed class ExportRunner
     }
 
     /// <summary>
-    /// On-demand raw backup of the SQLite database (a consistent single-file snapshot via
-    /// <c>VACUUM INTO</c>), uploaded as a timestamped <c>{Site}-backup-{ts}.db</c> so a history of
-    /// backups accumulates in the cloud rather than a single overwritten copy.
+    /// On-demand raw backup of the SQLite database, uploaded as a timestamped
+    /// <c>{Site}-backup-{ts}.db</c> so a history of backups accumulates in the cloud, in addition to
+    /// the single rolling <c>{Site}-backup.db</c> the schedule maintains.
     /// </summary>
     public async Task<ExportRunResult> RunDatabaseBackupAsync(CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var exportDir = Path.GetFullPath(_options.Export.DirectoryPath);
-            var site = Sanitize(_config.GetSiteName());
-            var fileName = $"{site}-backup-{DateTime.Now:yyyyMMdd_HHmm}.db";
-            var filePath = Path.Combine(exportDir, fileName);
-
-            _db.BackupTo(filePath);
-            var sizeMb = new FileInfo(filePath).Length / (1024.0 * 1024.0);
-            _log.LogInformation("DB backup: wrote {File} ({Size:F1} MB).", fileName, sizeMb);
-
-            var (uploaded, failed) = await UploadFilesAsync(new[] { filePath }, ct).ConfigureAwait(false);
-            var msg = $"Backed up database ({sizeMb:F1} MB)." + UploadSuffix(uploaded, failed, 1);
-            return new ExportRunResult(0, uploaded, failed, msg);
+            var fileName = $"{Sanitize(_config.GetSiteName())}-backup-{DateTime.Now:yyyyMMdd_HHmm}.db";
+            return await BackupAndUploadAsync(fileName, ct).ConfigureAwait(false);
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>Snapshot the database to <paramref name="fileName"/> (a consistent single-file
+    /// <c>VACUUM INTO</c> copy) and upload it. On a successful upload the retention watermark is
+    /// advanced to the max reading id captured, so pruning can reclaim it locally. Assumes the run
+    /// gate is held.</summary>
+    private async Task<ExportRunResult> BackupAndUploadAsync(string fileName, CancellationToken ct)
+    {
+        var exportDir = Path.GetFullPath(_options.Export.DirectoryPath);
+        var filePath = Path.Combine(exportDir, fileName);
+
+        var maxReadingId = _db.GetMaxReadingId();
+        _db.BackupTo(filePath);
+        var sizeMb = new FileInfo(filePath).Length / (1024.0 * 1024.0);
+        _log.LogInformation("DB backup: wrote {File} ({Size:F1} MB).", fileName, sizeMb);
+
+        var (uploaded, failed) = await UploadFilesAsync(new[] { filePath }, ct).ConfigureAwait(false);
+        if (uploaded > 0)
+            _db.SetBackupUploadedReadingId(maxReadingId); // the whole DB (up to this id) is now in the cloud
+
+        var msg = $"Backed up database ({sizeMb:F1} MB)." + UploadSuffix(uploaded, failed, 1);
+        return new ExportRunResult(0, uploaded, failed, msg);
     }
 
     private int Export()

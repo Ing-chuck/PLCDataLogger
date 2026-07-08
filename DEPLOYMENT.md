@@ -44,7 +44,10 @@ Open `http://localhost:5198/` on the PC and use the web UI (the primary configur
 1. **PLCs** — add each PLC (or use **Scan** to discover OPC UA servers on the subnet and add with
    one click). Changes apply live, no restart. Use security `None` only on a trusted/commissioning
    network; otherwise `Basic256Sha256` (and accept the PLC's certificate).
-2. **Upload** *(optional)* — choose `Google Drive`, set the destination folder, point at the OAuth
+2. **Tags** *(optional)* — by default every discovered tag is logged. Use this page to deselect tags
+   you don't need (grouped by subtree); saving rebuilds the subscription live. Skip it to log
+   everything.
+3. **Upload** *(optional)* — choose `Google Drive`, set the destination folder, point at the OAuth
    client JSON, and click **Connect Google…** once. See the upload section in
    [README](README.md#export-upload--retention) for the Google Cloud setup. Leave as `None` for
    offline sites.
@@ -65,12 +68,12 @@ Open `http://localhost:5198/` on the PC and use the web UI (the primary configur
    This opens the sign-in browser, stores the token (DPAPI, machine-bound), and exits — the running
    service then picks it up (restart it if needed). The OAuth **client** JSON is the same across all
    sites; only this one-time consent is per-machine.
-3. **Settings** — set the **site name** (labels the dashboard and export files), the **upload
+4. **Settings** — set the **site name** (labels the dashboard and export files), the **upload
    schedule** (every N minutes or daily at a time), and the **retention window** (days to keep).
    Applied live, no restart.
-4. **Backup** *(optional, on demand)* — export an arbitrary **time window** to a one-off per-PLC CSV,
+5. **Backup** *(optional, on demand)* — export an arbitrary **time window** to a one-off per-PLC CSV,
    or upload a **raw SQLite database backup** (`VACUUM INTO` snapshot).
-5. **Deeper tuning** *(in `appsettings.json`, then restart the service)* — `Subscription.DefaultDeadband`
+6. **Deeper tuning** *(in `appsettings.json`, then restart the service)* — `Subscription.DefaultDeadband`
    (raise to cut volume from noisy analog tags), discovery filter, and check intervals.
 
 Per-site settings live in two files next to the exe: `appsettings.json` (static seed defaults) and

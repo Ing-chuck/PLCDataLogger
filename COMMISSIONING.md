@@ -99,7 +99,11 @@ service restart needed.
    - [ ] Set the correct **security policy** per PLC (accept the PLC's certificate if using a secure
          policy).
 
-3. **Upload** _(online sites only; skip for offline)_ —
+3. **Tags** _(optional)_ —
+   - [ ] By default every discovered tag is logged. If the site only needs a subset, deselect the rest
+         on the **Tags** page (grouped by subtree); saving applies live. Skip to log everything.
+
+4. **Upload** _(online sites only; skip for offline)_ —
    - [ ] Choose **Google Drive**, set the **destination folder**, and point the credentials path at
          the OAuth client JSON you placed on the PC (e.g. in a `secrets\` folder next to the exe).
    - [ ] Authorize Google (see below), then **Test connection**.
@@ -132,13 +136,13 @@ only touch the UI.
   ```
 
 - [ ] **Health snapshot** looks right: `curl http://localhost:5198/api/health`
-- [ ] **Force one export/upload cycle** now instead of waiting for the schedule: click **Export &
-      upload now** on the dashboard. Then confirm:
-  - [ ] A rolling file per PLC appears in `<install>\exports\` named `<Site>-<PLC>.csv`.
+- [ ] **Force one backup upload** now instead of waiting for the schedule: click **Back up & upload
+      now** on the dashboard. Then confirm:
+  - [ ] A single backup file appears in `<install>\exports\` named `<Site>-backup.db`.
   - [ ] _(online)_ the file appears in the Google Drive destination folder, and the log shows
-        `Uploaded <Site>-<PLC>.csv`.
-- [ ] _(optional)_ On the **Backup** page, take a **database backup** to confirm the raw-DB path
-      works end to end (`<Site>-backup-<timestamp>.db`).
+        `Uploaded <Site>-backup.db`.
+- [ ] _(optional)_ On the **Backup** page, try **Export CSV now** and a timestamped **database
+      backup** to confirm those on-demand options work.
 - [ ] **Logs** are clean: `<install>\logs\plcdatalogger-*.log` (startup prints a config-validation
       summary).
 

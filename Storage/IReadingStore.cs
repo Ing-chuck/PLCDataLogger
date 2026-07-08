@@ -12,6 +12,9 @@ public sealed record PendingUpload(int PlcId, string FileName, string FilePath, 
 /// <summary>A PLC that has logged readings, identified for per-PLC export.</summary>
 public sealed record LoggedPlc(int PlcId, string Name);
 
+/// <summary>A discovered tag and whether the user has selected it for logging.</summary>
+public sealed record TagSelection(int TagId, string TagName, bool Enabled);
+
 /// <summary>One row streamed out for CSV export (timestamps as epoch-ms UTC).</summary>
 public sealed record ExportRow(
     long Id, long TsUtcMs, string PlcName, string TagName, double? Value, string? ValueText, string Quality);
@@ -32,8 +35,20 @@ public interface IReadingStore
 
     int UpsertPlc(string name, string endpointUrl, string securityPolicy);
 
-    /// <summary>Reconcile a PLC's discovered tags and return the live subscription bindings.</summary>
+    /// <summary>Reconcile a PLC's discovered tags and return the live subscription bindings
+    /// (active <b>and</b> user-enabled tags only).</summary>
     IReadOnlyList<TagBinding> SyncTags(int plcId, IReadOnlyCollection<DiscoveredTag> tags);
+
+    /// <summary>Current subscription bindings for a PLC (active + enabled), without re-browsing —
+    /// used to rebuild the subscription after a tag-selection change.</summary>
+    IReadOnlyList<TagBinding> GetEnabledBindings(int plcId);
+
+    /// <summary>All active tags for a PLC with their logged/unlogged selection, ordered by name.</summary>
+    IReadOnlyList<TagSelection> GetTagSelection(int plcId);
+
+    /// <summary>Set exactly <paramref name="enabledTagIds"/> as logged for a PLC; all other active
+    /// tags become unlogged.</summary>
+    void SetTagsEnabled(int plcId, IReadOnlyCollection<int> enabledTagIds);
 
     void SetTagDataType(int tagId, string dataType);
 
@@ -54,9 +69,16 @@ public interface IReadingStore
     /// (via <c>VACUUM INTO</c>) — safe to run while logging continues. Used for the raw DB backup.</summary>
     void BackupTo(string destPath);
 
-    /// <summary>Lowest reading id that every PLC's export file has been uploaded up to — the safe
-    /// pruning watermark, so retention never drops a reading that hasn't reached the cloud yet.</summary>
+    /// <summary>Highest reading id currently in the store.</summary>
+    long GetMaxReadingId();
+
+    /// <summary>Reading id up to which a database backup has been uploaded — the safe pruning
+    /// watermark, so retention never drops a reading before a full snapshot of it reached the cloud.</summary>
     long GetMaxUploadedReadingId();
+
+    /// <summary>Record that a backup containing readings up to <paramref name="readingId"/> was
+    /// uploaded, advancing the retention pruning watermark.</summary>
+    void SetBackupUploadedReadingId(long readingId);
 
     /// <summary>Record that a PLC's export file was (re)written up to <paramref name="maxReadingId"/>.
     /// Marks it pending upload when its contents advanced past the last uploaded point.</summary>

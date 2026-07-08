@@ -29,11 +29,17 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
     private readonly HealthMonitor _health;
     private readonly ILogger _log;
 
+    private static readonly IReadOnlyDictionary<string, string> NoNames = new Dictionary<string, string>();
+
     private Session? _session;
     private Subscription? _subscription;
     private SessionReconnectHandler? _reconnectHandler;
     private int _plcId;
+    private int _lastDiscoveredCount;
 
+    // Serializes discovery/subscription rebuilds so the periodic re-discovery and a UI-triggered
+    // tag-selection change can't rebuild the subscription concurrently.
+    private readonly SemaphoreSlim _discoveryGate = new(1, 1);
     private readonly DeadbandGate _deadband = new();
 
     public OpcUaPlcSession(
@@ -93,16 +99,45 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
     {
         if (_session is null) return;
 
-        var discovered = BrowseTags(_session, ct);
-        _log.LogInformation("[{Plc}] Discovery found {Count} variable tags.", _plc.Name, discovered.Count);
+        await _discoveryGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var discovered = BrowseTags(_session, ct);
+            _lastDiscoveredCount = discovered.Count;
+            _log.LogInformation("[{Plc}] Discovery found {Count} variable tags.", _plc.Name, discovered.Count);
 
-        var bindings = _db.SyncTags(_plcId, discovered);
-        var nameByNode = discovered
-            .GroupBy(d => d.NodeId, StringComparer.Ordinal)
-            .ToDictionary(g => g.Key, g => g.First().Name, StringComparer.Ordinal);
+            var bindings = _db.SyncTags(_plcId, discovered);
+            var nameByNode = discovered
+                .GroupBy(d => d.NodeId, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.First().Name, StringComparer.Ordinal);
 
-        await BuildSubscriptionAsync(bindings, nameByNode, ct).ConfigureAwait(false);
-        _health.SetDiscovery(_plc.Name, discovered.Count, (int)(_subscription?.MonitoredItemCount ?? 0));
+            await BuildSubscriptionAsync(bindings, nameByNode, ct).ConfigureAwait(false);
+            _health.SetDiscovery(_plc.Name, discovered.Count, (int)(_subscription?.MonitoredItemCount ?? 0));
+        }
+        finally
+        {
+            _discoveryGate.Release();
+        }
+    }
+
+    /// <summary>Rebuild the subscription from the current tag selection in the store, without
+    /// re-browsing the server — used to apply a UI tag-selection change live.</summary>
+    public async Task RebuildSubscriptionAsync(CancellationToken ct)
+    {
+        if (_session is null) return;
+
+        await _discoveryGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var bindings = _db.GetEnabledBindings(_plcId);
+            _log.LogInformation("[{Plc}] Rebuilding subscription for {Count} enabled tag(s).", _plc.Name, bindings.Count);
+            await BuildSubscriptionAsync(bindings, NoNames, ct).ConfigureAwait(false);
+            _health.SetDiscovery(_plc.Name, _lastDiscoveredCount, (int)(_subscription?.MonitoredItemCount ?? 0));
+        }
+        finally
+        {
+            _discoveryGate.Release();
+        }
     }
 
     private async Task BuildSubscriptionAsync(
@@ -382,5 +417,7 @@ public sealed class OpcUaPlcSession : IAsyncDisposable
             try { await _session.CloseAsync().ConfigureAwait(false); } catch { /* best effort */ }
             _session.Dispose();
         }
+
+        _discoveryGate.Dispose();
     }
 }

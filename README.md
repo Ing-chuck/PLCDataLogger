@@ -181,8 +181,10 @@ is trivial on a LAN).
 ### Inspecting the data
 
 Long/narrow schema (one row per reading), so adding/removing tags never needs a migration:
-`plcs`, `tags`, `readings` (`ts_utc` epoch-ms, `value`/`value_text`, `quality` code), `upload_log`,
-`settings`. Open `data/plcdata.db` with any SQLite tool — timestamps are epoch-ms, e.g.:
+`plcs`, `tags` (incl. `active` and user-selected `enabled` flags), `readings` (`ts_utc` epoch-ms,
+`value`/`value_text`, `quality` code), `export_state` (per-PLC CSV export state), and `settings`
+(incl. the backup-upload retention watermark). Open `data/plcdata.db` with any SQLite tool —
+timestamps are epoch-ms, e.g.:
 
 ```sql
 SELECT t.tag_name, datetime(r.ts_utc/1000, 'unixepoch') AS ts, r.value, r.quality
@@ -232,33 +234,34 @@ To remove the service (leaving the install directory and data in place):
 
 ## Export, upload & retention
 
-**CSV export.** On the configured schedule the logger regenerates **one rolling CSV per PLC** in
-`Export.DirectoryPath`, named `{SiteName}-{PlcName}.csv` (site name is set on the Settings page). Each
-file is overwritten from the readings still in the local store — a long-format snapshot, one row per
-reading: `timestamp_utc, plc_name, tag_name, value, quality`. Because the file mirrors the retained
-window, rows aged out by retention drop off it too. Per-PLC state (last exported/uploaded reading id)
-lives in the `export_state` table. The export always runs, even with no internet, because the files
-are useful for manual pickup (USB/RDP). Set `Export.RunOnStartup: true` to verify it without waiting
-for the scheduled time.
+**Scheduled backup upload.** On the configured schedule the logger uploads a **single, overwritten
+database backup** — a consistent one-file snapshot of the whole SQLite store (via `VACUUM INTO`, safe
+while logging continues) named `{SiteName}-backup.db`, re-uploaded over the same cloud file each cycle.
+A fresh local copy is written even with no internet (`None` provider), for manual pickup (USB/RDP). Set
+`Export.RunOnStartup: true` to run one shortly after startup. Because the backup mirrors the local
+store, it reflects the retention window — data pruned locally drops out of the next backup too.
 
-**Schedule.** The export+upload cadence is set on the **Settings** page — either _every N minutes_ or
-_daily at a fixed local time_. Changes take effect immediately (the scheduler re-plans without a
-restart). `Export.DailyAtLocalTime` in appsettings seeds the initial value.
+**Schedule.** The cadence is set on the **Settings** page — either _every N minutes_ or _daily at a
+fixed local time_. Changes take effect immediately (the scheduler re-plans without a restart).
+`Export.DailyAtLocalTime` in appsettings seeds the initial value.
 
+**CSV export (on demand).** CSV was found cumbersome for large sites, so it is no longer uploaded on
+the schedule — but the option remains on the **Backup** page:
 
-**One-off windowed export.** The **Backup** page can export an arbitrary time range to its own
-uniquely-named file per PLC (`{SiteName}-{PlcName}-{start}_{end}.csv`) and upload it, independent of
-the rolling daily files — handy for pulling a specific incident window for analysis.
+- **All tags** — regenerates one rolling `{SiteName}-{PlcName}.csv` per PLC from the retained readings
+  (long format: `timestamp_utc, plc_name, tag_name, value, quality`) and uploads it, overwriting the
+  same file. Per-PLC state lives in the `export_state` table.
+- **Time window** — a one-off export of an arbitrary range to a uniquely-named
+  `{SiteName}-{PlcName}-{start}_{end}.csv`, handy for pulling a specific incident window.
 
-**Raw database backup.** The **Backup** page can also upload a consistent single-file snapshot of the
-whole SQLite database (via `VACUUM INTO`, safe while logging continues) as a timestamped
-`{SiteName}-backup-{timestamp}.db` — no CSV conversion, so it can be opened directly. Each backup is a
-new file, keeping a history in the cloud.
+**Timestamped database archive (on demand).** The **Backup** page can also upload a
+`{SiteName}-backup-{timestamp}.db` snapshot — a keep-forever archive kept alongside the single rolling
+backup the schedule maintains.
 
-**Cloud upload (pluggable).** After exporting, each PLC file whose contents changed since its last
-successful upload is re-sent via the configured `ICloudUploadProvider`, **overwriting the same
-destination file** rather than accumulating dated copies. Upload runs entirely off the logging hot
-path: failures are retried on the next cycle and never slow down or block recording.
+**Cloud upload (pluggable).** Uploads go through the configured `ICloudUploadProvider`, **overwriting
+the same destination file** (rolling backup / CSV) rather than accumulating dated copies; timestamped
+archives are the deliberate exception. Upload runs entirely off the logging hot path: failures are
+retried on the next cycle and never slow down or block recording.
 
 - **`None`** (default) — does nothing and is a fully supported permanent state for offline sites.
 - **`GoogleDrive`** — uploads to a Drive folder. Authentication uses OAuth with the refresh token
@@ -275,8 +278,9 @@ path: failures are retried on the next cycle and never slow down or block record
 the retention window (set on the **Settings** page; `Storage.RetentionDays` seeds it), in one of two
 modes:
 
-- **Upload enabled** (a real provider) — only prune old readings that have been _confirmed
-  uploaded_; un-uploaded data is never dropped.
+- **Upload enabled** (a real provider) — only prune readings that are already contained in a
+  **database backup that was uploaded** (the backup upload advances the pruning watermark); data not
+  yet backed up to the cloud is never dropped.
 - **Upload disabled** (`None`) — prune purely by age. Very old data at offline sites is then only
   retrievable directly from the machine.
 
@@ -288,11 +292,12 @@ service (§11). Browse to `http://localhost:5198/`.
 
 | Page | Purpose |
 | --- | --- |
-| **Dashboard** | Live status, plus an **Export & upload now** button to run the export/upload pass on demand. |
+| **Dashboard** | Live status, plus a **Back up & upload now** button to run the scheduled database-backup upload on demand. |
 | **PLCs** | Add / edit / remove PLC connections. Changes apply **live** — sessions are added, removed, or reconnected without a service restart (§5). |
 | **Scan** | Discover OPC UA servers on the local subnet (TCP 4840 sweep + FindServers enrichment) and add one as a PLC with one click. |
+| **Tags** | Choose which discovered tags are logged, in a **subtree tree** (folders per `GLOBALES` / `fb_BREC1` …). Every tag is logged by default; deselecting one stops new readings for it (history is kept). Saving rebuilds the live subscription without a restart. |
 | **Upload** | Choose the cloud provider, edit its settings (with a **Browse…** server-side file/folder picker for the credentials/token paths), test the connection, and run the Google OAuth consent. |
-| **Backup** | Export an arbitrary **time window** to a one-off per-PLC CSV, or upload a **raw SQLite database backup** (`VACUUM INTO` snapshot) — both on demand. |
+| **Backup** | On-demand: export **all tags** or a **time window** to CSV, or upload a timestamped **raw SQLite database backup** (`VACUUM INTO` snapshot). |
 | **Settings** | Set the **site name** (labels the dashboard and export files), the **upload schedule** (interval or daily time), and the **retention window** (days of readings to keep). |
 
 Editable configuration (PLC connections and upload settings) is stored in `config.local.json`
@@ -306,7 +311,8 @@ GET    /api/scan             discover OPC UA servers on the LAN
 GET    /api/plcs             list configured PLCs
 POST   /api/plcs             add/replace a PLC  { name, endpointUrl, securityPolicy }
 DELETE /api/plcs/{name}      remove a PLC
-POST   /api/export-now       run an export + upload pass immediately
+POST   /api/backup-now       upload the rolling database backup immediately (the scheduled action)
+POST   /api/export-now       run a CSV export + upload pass immediately (on-demand option)
 ```
 
 > Google Drive upload and its OAuth consent flow are validated end-to-end. Certificate-trust

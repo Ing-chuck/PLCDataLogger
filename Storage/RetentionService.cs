@@ -44,6 +44,13 @@ public sealed class RetentionService : BackgroundService
         {
             try
             {
+                // The store is initialized by the storage writer at startup; don't sweep until it is.
+                if (!_db.IsInitialized)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken).ConfigureAwait(false);
+                    continue;
+                }
+
                 // Recompute the mode each sweep — the upload provider can change at runtime.
                 Sweep(_providers.Current.ProviderName != "None");
                 await Task.Delay(interval, stoppingToken).ConfigureAwait(false);

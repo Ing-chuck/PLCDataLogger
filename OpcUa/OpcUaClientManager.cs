@@ -55,6 +55,30 @@ public sealed class OpcUaClientManager : BackgroundService
     private sealed record Runner(PlcOptions Plc, CancellationTokenSource Cts)
     {
         public Task Task { get; set; } = Task.CompletedTask;
+
+        /// <summary>The currently-connected session, if any — used to apply tag-selection changes live.</summary>
+        public OpcUaPlcSession? Session { get; set; }
+    }
+
+    /// <summary>Apply an updated tag selection to a running PLC by rebuilding its subscription. If the
+    /// PLC isn't currently connected, the change is picked up on its next connect/re-discovery.</summary>
+    public async Task ApplyTagSelectionAsync(string plcName, CancellationToken ct = default)
+    {
+        OpcUaPlcSession? session;
+        lock (_gate)
+        {
+            _runners.TryGetValue(plcName, out var runner);
+            session = runner?.Session;
+        }
+
+        if (session is null)
+        {
+            _log.LogInformation("[{Plc}] Tag selection saved; not connected, will apply on next connect.", plcName);
+            return;
+        }
+
+        await session.RebuildSubscriptionAsync(ct).ConfigureAwait(false);
+        _log.LogInformation("[{Plc}] Applied updated tag selection.", plcName);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -130,7 +154,7 @@ public sealed class OpcUaClientManager : BackgroundService
                 _log.LogInformation("[{Plc}] Starting session for {Endpoint}.", name, plc.EndpointUrl);
                 var cts = CancellationTokenSource.CreateLinkedTokenSource(_stoppingToken);
                 var runner = new Runner(plc, cts);
-                runner.Task = RunPlcAsync(plc, cts.Token);
+                runner.Task = RunPlcAsync(runner, cts.Token);
                 _runners[name] = runner;
             }
 
@@ -143,14 +167,16 @@ public sealed class OpcUaClientManager : BackgroundService
         string.Equals(a.EndpointUrl, b.EndpointUrl, StringComparison.OrdinalIgnoreCase) &&
         string.Equals(a.SecurityPolicy, b.SecurityPolicy, StringComparison.OrdinalIgnoreCase);
 
-    private async Task RunPlcAsync(PlcOptions plc, CancellationToken ct)
+    private async Task RunPlcAsync(Runner runner, CancellationToken ct)
     {
+        var plc = runner.Plc;
         var rescanInterval = TimeSpan.FromMinutes(Math.Max(1, _options.Discovery.RescanIntervalMinutes));
         var filter = new TagFilter(_options.Discovery.Filter);
 
         while (!ct.IsCancellationRequested)
         {
             var session = new OpcUaPlcSession(plc, _options.Subscription, filter, _appConfig!, _db, _buffer, _health, _sessionLogger!);
+            runner.Session = session;
             try
             {
                 await session.StartAsync(ct).ConfigureAwait(false);
@@ -165,11 +191,13 @@ public sealed class OpcUaClientManager : BackgroundService
             }
             catch (OperationCanceledException)
             {
+                runner.Session = null;
                 await session.DisposeAsync().ConfigureAwait(false);
                 break;
             }
             catch (Exception ex)
             {
+                runner.Session = null;
                 await session.DisposeAsync().ConfigureAwait(false);
                 _health.SetDisconnected(plc.Name, ex.Message);
                 _log.LogError(ex, "[{Plc}] Connection failed; retrying in {Delay}s.",

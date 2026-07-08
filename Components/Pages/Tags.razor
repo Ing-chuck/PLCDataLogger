@@ -1,0 +1,156 @@
+@page "/tags"
+@using PlcDataLogger.OpcUa
+@using PlcDataLogger.Storage
+@inject IReadingStore Store
+@inject OpcUaClientManager Manager
+
+<h1>Logged tags</h1>
+<p class="sub">Choose which discovered tags are recorded to the database, grouped by subtree. Changes
+    apply live to the running subscription.</p>
+
+<div class="form">
+    @if (_plcs.Count == 0)
+    {
+        <p class="muted">No PLCs have discovered tags yet. Connect a PLC and let discovery run first.</p>
+    }
+    else
+    {
+        <label>PLC
+            <select @bind="_plcName" @bind:after="LoadTags">
+                @foreach (var p in _plcs)
+                {
+                    <option value="@p.Name">@p.Name</option>
+                }
+            </select>
+        </label>
+
+        @if (_root is null || _totalLeaves == 0)
+        {
+            <p class="muted">No tags discovered for this PLC yet.</p>
+        }
+        else
+        {
+            <div class="toolbar">
+                <button class="btn" @onclick="SelectAll">Select all</button>
+                <button class="btn" @onclick="SelectNone">Select none</button>
+                <button class="btn" @onclick="() => SetExpanded(true)">Expand all</button>
+                <button class="btn" @onclick="() => SetExpanded(false)">Collapse all</button>
+                <span class="muted">@_selected.Count of @_totalLeaves selected</span>
+            </div>
+
+            <div class="tree">
+                @foreach (var child in _root.Children)
+                {
+                    <TagTreeView Node="child" Selected="_selected" Version="_version" OnChanged="OnTreeChanged" />
+                }
+            </div>
+
+            <div class="actions">
+                <button class="btn primary" @onclick="Save" disabled="@_busy">
+                    @(_busy ? "Applying…" : "Save & apply")
+                </button>
+            </div>
+            @if (_message is not null)
+            {
+                <p class="@(_ok ? "ok-msg" : "err")">@_message</p>
+            }
+        }
+    }
+</div>
+
+<style>
+    .toolbar { display: flex; gap: 8px; align-items: center; margin: 10px 0; flex-wrap: wrap; }
+    .tree { max-height: 60vh; overflow: auto; border: 1px solid #2a2f3a; border-radius: 6px;
+            padding: 8px 12px; background: #14171d; }
+    .tt-folder { display: flex; align-items: center; gap: 4px; margin: 2px 0; }
+    .tt-twisty { cursor: pointer; width: 1em; display: inline-block; color: #9aa0a6; user-select: none; }
+    .tt-name { font-weight: 600; }
+    .tt-count { color: #6b7280; font-size: .82rem; margin-left: 4px; }
+    .tt-count.partial { color: #d0a54f; }
+    .tt-children { margin-left: 18px; border-left: 1px solid #23272f; padding-left: 8px; }
+
+    /* Override the global .form block-input styling so tree checkboxes sit inline next to the label,
+       not stacked full-width above it. Selectors are prefixed with .tree to win specificity. */
+    .tree .tt-leaf { display: flex; align-items: center; margin: 2px 0; }
+    .tree .tt-folder label { display: inline-flex; align-items: center; margin: 0; }
+    .tree label { font-size: .9rem; color: #d6d9de; }
+    .tree input[type=checkbox] { width: auto; min-width: 0; display: inline-block; flex: none;
+                                 margin: 0 6px 0 0; padding: 0; vertical-align: middle; }
+</style>
+
+@code {
+    private IReadOnlyList<LoggedPlc> _plcs = Array.Empty<LoggedPlc>();
+    private string? _plcName;
+    private TagNode? _root;
+    private HashSet<int> _selected = new();
+    private int _totalLeaves;
+    private int _version;
+    private bool _busy;
+    private bool _ok;
+    private string? _message;
+
+    protected override void OnInitialized()
+    {
+        _plcs = Store.GetLoggedPlcs();
+        _plcName = _plcs.FirstOrDefault()?.Name;
+        LoadTags();
+    }
+
+    private int PlcId => _plcs.FirstOrDefault(p => p.Name == _plcName)?.PlcId ?? 0;
+
+    private void LoadTags()
+    {
+        _message = null;
+        if (PlcId == 0) { _root = null; _totalLeaves = 0; return; }
+
+        var tags = Store.GetTagSelection(PlcId);
+        (_root, _totalLeaves) = TagNode.Build(tags);
+        _selected = tags.Where(t => t.Enabled).Select(t => t.TagId).ToHashSet();
+        _version++;
+    }
+
+    private void OnTreeChanged()
+    {
+        // Bump the version so the recursive tree re-renders (folder counts, parent checkboxes).
+        _version++;
+    }
+
+    private void SelectAll()
+    {
+        if (_root is null) return;
+        _selected.Clear();
+        foreach (var id in _root.LeafIds) _selected.Add(id);
+        _version++;
+    }
+
+    private void SelectNone()
+    {
+        _selected.Clear();
+        _version++;
+    }
+
+    private void SetExpanded(bool expanded)
+    {
+        _root?.SetExpandedRecursive(expanded);
+        _version++;
+    }
+
+    private async Task Save()
+    {
+        _busy = true;
+        _message = null;
+        try
+        {
+            Store.SetTagsEnabled(PlcId, _selected.ToList());
+            await Manager.ApplyTagSelectionAsync(_plcName!);
+            _ok = true;
+            _message = $"Saved — {_selected.Count} of {_totalLeaves} tag(s) now logged for {_plcName}.";
+        }
+        catch (Exception ex)
+        {
+            _ok = false;
+            _message = "Failed: " + ex.Message;
+        }
+        finally { _busy = false; }
+    }
+}

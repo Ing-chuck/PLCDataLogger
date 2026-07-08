@@ -52,8 +52,28 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
             Execute("PRAGMA foreign_keys=ON;");
 
             Execute(SchemaSql);
+            MigrateSchema();
             _initialized = true;
         }
+    }
+
+    /// <summary>Add columns introduced after the initial schema, so databases created by older
+    /// versions upgrade in place.</summary>
+    private void MigrateSchema()
+    {
+        if (!ColumnExists("tags", "enabled"))
+            Execute("ALTER TABLE tags ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;");
+    }
+
+    private bool ColumnExists(string table, string column)
+    {
+        using var cmd = Conn.CreateCommand();
+        cmd.CommandText = $"PRAGMA table_info({table});";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
     }
 
     public string? GetLastExportedAt() => ScalarString("SELECT MAX(exported_at) FROM export_state;");
@@ -129,7 +149,7 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
             {
                 select.Transaction = tx;
                 select.CommandText =
-                    "SELECT node_id, tag_id, deadband_override FROM tags WHERE plc_id = $plc AND active = 1;";
+                    "SELECT node_id, tag_id, deadband_override FROM tags WHERE plc_id = $plc AND active = 1 AND enabled = 1;";
                 select.Parameters.AddWithValue("$plc", plcId);
                 using var reader = select.ExecuteReader();
                 while (reader.Read())
@@ -174,6 +194,70 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
                 cmd.ExecuteNonQuery();
             }
 
+            tx.Commit();
+        }
+    }
+
+    public IReadOnlyList<TagBinding> GetEnabledBindings(int plcId)
+    {
+        lock (_gate)
+        {
+            var bindings = new List<TagBinding>();
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT node_id, tag_id, deadband_override FROM tags WHERE plc_id = $plc AND active = 1 AND enabled = 1;";
+            cmd.Parameters.AddWithValue("$plc", plcId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var deadband = reader.IsDBNull(2) ? (double?)null : reader.GetDouble(2);
+                bindings.Add(new TagBinding(reader.GetString(0), reader.GetInt32(1), deadband));
+            }
+            return bindings;
+        }
+    }
+
+    public IReadOnlyList<TagSelection> GetTagSelection(int plcId)
+    {
+        lock (_gate)
+        {
+            var list = new List<TagSelection>();
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT tag_id, tag_name, enabled FROM tags WHERE plc_id = $plc AND active = 1 ORDER BY tag_name;";
+            cmd.Parameters.AddWithValue("$plc", plcId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                list.Add(new TagSelection(reader.GetInt32(0), reader.GetString(1), reader.GetInt32(2) != 0));
+            return list;
+        }
+    }
+
+    public void SetTagsEnabled(int plcId, IReadOnlyCollection<int> enabledTagIds)
+    {
+        lock (_gate)
+        {
+            using var tx = Conn.BeginTransaction();
+            using (var off = Conn.CreateCommand())
+            {
+                off.Transaction = tx;
+                off.CommandText = "UPDATE tags SET enabled = 0 WHERE plc_id = $plc AND active = 1;";
+                off.Parameters.AddWithValue("$plc", plcId);
+                off.ExecuteNonQuery();
+            }
+            if (enabledTagIds.Count > 0)
+            {
+                using var on = Conn.CreateCommand();
+                on.Transaction = tx;
+                on.CommandText = "UPDATE tags SET enabled = 1 WHERE tag_id = $id AND plc_id = $plc;";
+                var pId = on.Parameters.Add("$id", SqliteType.Integer);
+                on.Parameters.AddWithValue("$plc", plcId);
+                foreach (var id in enabledTagIds)
+                {
+                    pId.Value = id;
+                    on.ExecuteNonQuery();
+                }
+            }
             tx.Commit();
         }
     }
@@ -276,10 +360,27 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
         }
     }
 
-    // Safe pruning watermark: the lowest point every logged PLC's file has been uploaded up to.
-    // If any PLC has never uploaded (uploaded_reading_id = 0), this is 0 and retention holds off.
+    public long GetMaxReadingId() => ScalarLong("SELECT COALESCE(MAX(id), 0) FROM readings;");
+
+    // Safe pruning watermark: the max reading id contained in the last database backup that was
+    // uploaded to the cloud. Retention never prunes past this, so nothing is dropped locally until a
+    // full snapshot of it is safely off-machine. 0 (no backup uploaded yet) means retention holds off.
     public long GetMaxUploadedReadingId() =>
-        ScalarLong("SELECT COALESCE(MIN(uploaded_reading_id), 0) FROM export_state;");
+        ScalarLong("SELECT COALESCE(CAST(value AS INTEGER), 0) FROM settings WHERE key = 'backup_uploaded_reading_id';");
+
+    public void SetBackupUploadedReadingId(long readingId)
+    {
+        lock (_gate)
+        {
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO settings (key, value) VALUES ('backup_uploaded_reading_id', $v)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                """;
+            cmd.Parameters.AddWithValue("$v", readingId);
+            cmd.ExecuteNonQuery();
+        }
+    }
 
     public void RecordExport(int plcId, string fileName, string filePath, long maxReadingId, int rowCount)
     {
@@ -469,6 +570,7 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
             first_seen_at     TEXT NOT NULL,
             last_seen_at      TEXT NOT NULL,
             active            INTEGER NOT NULL DEFAULT 1,
+            enabled           INTEGER NOT NULL DEFAULT 1,  -- user selection: is this tag logged?
             UNIQUE(plc_id, node_id)
         );
 
