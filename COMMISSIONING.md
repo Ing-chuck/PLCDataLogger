@@ -25,8 +25,8 @@ Gather and confirm, so you are not blocked on site:
       consent screen **published**). This is the same file for every site; it is **never** in the
       distribution zip — carry it separately (USB/secure transfer). See the upload setup in
       [README](README.md#export-upload--retention).
-- [ ] **Retention window** (days of readings to keep locally) and **upload schedule** (every N
-      minutes, or daily at a fixed time) agreed with the customer.
+- [ ] **Retention window** (days of readings to keep locally), **upload schedule** (interval / daily /
+      weekly / monthly) and **partition size** agreed with the customer.
 - [ ] The build zip for the version you intend to install.
 
 Build the zip (on a dev machine, if you don't already have it):
@@ -87,9 +87,11 @@ All configuration is done in the browser at `http://localhost:5198/`. Changes ap
 service restart needed.
 
 1. **Settings** — set:
-   - [ ] **Site name** (used in export filenames and the dashboard header).
-   - [ ] **Upload schedule** — _every N minutes_ or _daily at HH:mm_ (off-peak times avoid competing
-         with production traffic).
+   - [ ] **Site name** (used in upload filenames and the dashboard header).
+   - [ ] **Upload schedule** — _interval_, _daily_, _weekly_ or _monthly_ (off-peak times avoid
+         competing with production traffic).
+   - [ ] **Partition size** (hours) — the Parquet window size; must be ≤ the upload period.
+         Optionally **keep uploaded partitions** locally.
    - [ ] **Retention window** — days of readings to keep locally (`0` = keep everything). With upload
          enabled, data is only pruned once it has been uploaded.
 
@@ -136,11 +138,12 @@ only touch the UI.
   ```
 
 - [ ] **Health snapshot** looks right: `curl http://localhost:5198/api/health`
-- [ ] **Force one backup upload** now instead of waiting for the schedule: click **Back up & upload
-      now** on the dashboard. Then confirm:
-  - [ ] A single backup file appears in `<install>\exports\` named `<Site>-backup.db`.
-  - [ ] _(online)_ the file appears in the Google Drive destination folder, and the log shows
-        `Uploaded <Site>-backup.db`.
+- [ ] **Force one upload** now instead of waiting for the schedule: click **Upload partitions now**
+      on the dashboard. Then confirm:
+  - [ ] _(online)_ Parquet files named `<Site>-<timestamp>Z.parquet` appear in the Google Drive
+        destination folder, and the log shows `Uploaded <Site>-…​.parquet`.
+  - [ ] _(offline / keep enabled)_ the files stay under `<install>\exports\partitions\`; otherwise
+        they're deleted right after uploading.
 - [ ] _(optional)_ On the **Backup** page, try **Export CSV now** and a timestamped **database
       backup** to confirm those on-demand options work.
 - [ ] **Logs** are clean: `<install>\logs\plcdatalogger-*.log` (startup prints a config-validation
@@ -169,9 +172,9 @@ Leave with the site / record centrally:
 - Where data lives: `data\plcdata.db` (source of truth) and `exports\` (CSV pickup).
 - **Do not delete** `data\`, `config.local.json`, `secrets\`, `google_token\`, or `pki\` — these are
   per-machine state and secrets.
-- How to pull data off an **offline** machine: copy the latest `exports\<Site>-<PLC>.csv`, use the
-  **Backup** page's windowed export / DB backup, or copy `data\plcdata.db` (+ `-wal`/`-shm`, or stop
-  the service first for a clean single-file copy).
+- How to pull data off an **offline** machine: enable _keep uploaded partitions_ and copy
+  `exports\partitions\*.parquet`, use the **Backup** page's CSV / windowed export / DB backup, or copy
+  `data\plcdata.db` (+ `-wal`/`-shm`, or stop the service first for a clean single-file copy).
 
 ---
 
@@ -222,7 +225,7 @@ if in doubt.
 | Uninstall | `scripts\uninstall-service.ps1` (elevated) |
 | Google consent | `.\PLCDataLogger.exe --authorize` (desktop session) |
 | Data | `<install>\data\plcdata.db` |
-| Exports | `<install>\exports\<Site>-<PLC>.csv` |
+| Uploads | `<install>\exports\partitions\<Site>-<ts>Z.parquet` (CSV/backups under `exports\`) |
 | Logs | `<install>\logs\plcdatalogger-*.log` |
 | Config (UI-written) | `<install>\config.local.json` |
 | Ports | PLC OPC UA `4840/tcp` out · Google `443/tcp` out (if enabled) · UI `5198/tcp` local |

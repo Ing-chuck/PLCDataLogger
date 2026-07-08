@@ -3,15 +3,14 @@
 @inject ConfigStore Store
 
 <h1>Settings</h1>
-<p class="sub">Site-wide options: naming, upload schedule and how long readings are kept.</p>
+<p class="sub">Site-wide options: naming, upload schedule, data partitioning and retention.</p>
 
 <div class="form">
     <label>Site name
         <input @bind="_siteName" placeholder="e.g. Planta Norte" />
     </label>
     <p class="muted small">
-        Export files are named <code>@Preview()</code> — one rolling CSV per PLC, overwritten each
-        run and re-uploaded over the same cloud file.
+        Uploaded Parquet partitions are named <code>@Preview()</code>.
     </p>
 
     <hr class="sep" />
@@ -19,6 +18,8 @@
     <label>Upload schedule
         <select @bind="_schedule.Mode">
             <option value="Daily">Daily at a fixed time</option>
+            <option value="Weekly">Weekly on a day + time</option>
+            <option value="Monthly">Monthly on a day + time</option>
             <option value="Interval">Every N minutes</option>
         </select>
     </label>
@@ -28,11 +29,29 @@
         <label>Run every (minutes)
             <input type="number" min="1" @bind="_schedule.IntervalMinutes" />
         </label>
-        <p class="muted small">More frequent uploads = smaller lag but more bandwidth. e.g. 360 = every 6 hours.</p>
+        <p class="muted small">More frequent = smaller lag but more overhead. e.g. 360 = every 6 hours.</p>
     }
     else
     {
-        <label>Daily at (local time, HH:mm)
+        @if (_schedule.Mode == "Weekly")
+        {
+            <label>Day of week
+                <select @bind="_schedule.DayOfWeek">
+                    @for (var d = 0; d < 7; d++)
+                    {
+                        var dv = d;
+                        <option value="@dv">@((DayOfWeek)dv)</option>
+                    }
+                </select>
+            </label>
+        }
+        @if (_schedule.Mode == "Monthly")
+        {
+            <label>Day of month (1–28)
+                <input type="number" min="1" max="28" @bind="_schedule.DayOfMonth" />
+            </label>
+        }
+        <label>At (local time, HH:mm)
             <input @bind="_schedule.DailyAtLocalTime" placeholder="02:00" />
         </label>
         <p class="muted small">Off-peak times avoid competing with production traffic.</p>
@@ -40,13 +59,28 @@
 
     <hr class="sep" />
 
+    <label>Partition size (hours)
+        <input type="number" min="1" @bind="_schedule.PartitionHours" />
+    </label>
+    <p class="muted small">
+        Each upload sends zstd-compressed Parquet files, one per time window of this size (use multiples
+        of 24 for days). Must be ≤ the upload period — currently ≤ @($"{_schedule.UploadPeriodHours():0.#}") h.
+    </p>
+
+    <label class="check">
+        <input type="checkbox" @bind="_schedule.KeepUploadedPartitions" />
+        Keep uploaded partition files locally (until older than the retention window)
+    </label>
+    <p class="muted small">Off (default): delete each partition file right after it uploads successfully.</p>
+
+    <hr class="sep" />
+
     <label>Retention window (days)
         <input type="number" min="0" @bind="_retentionDays" />
     </label>
     <p class="muted small">
-        Readings older than this are pruned locally to manage disk. 0 keeps everything. When an upload
-        provider is set, data is only pruned once it has been uploaded. Note the rolling CSV/cloud copy
-        mirrors this window — rows older than retention drop off it too.
+        Readings older than this are pruned locally to manage disk. 0 keeps everything. With an upload
+        provider set, a reading is only pruned once it has been uploaded in a partition.
     </p>
 
     <div class="actions">
@@ -55,18 +89,21 @@
 
     @if (_message is not null)
     {
-        <p class="ok-msg">@_message</p>
+        <p class="@(_ok ? "ok-msg" : "err")">@_message</p>
     }
 </div>
 
 <style>
     .sep { border: none; border-top: 1px solid #2a2f3a; margin: 18px 0; }
+    .check { display: flex; align-items: center; gap: 8px; }
+    .check input[type=checkbox] { width: auto; margin: 0; }
 </style>
 
 @code {
     private string _siteName = "";
     private ScheduleConfig _schedule = new();
     private int _retentionDays = 90;
+    private bool _ok;
     private string? _message;
 
     protected override void OnInitialized()
@@ -78,25 +115,36 @@
 
     private void Save()
     {
+        var error = _schedule.Validate();
+        if (error is not null)
+        {
+            _ok = false;
+            _message = error;
+            return;
+        }
+
         Store.SetSiteName(_siteName);
         Store.SetSchedule(_schedule);
         Store.SetRetentionDays(_retentionDays);
 
-        // Re-read to reflect any normalization (trimmed name, clamped retention).
         _siteName = Store.GetSiteName();
         _retentionDays = Store.GetRetentionDays();
-        _message = $"Saved. Exports use \"{_siteName}\", {Describe()}, keeping {_retentionDays} day(s).";
+        _ok = true;
+        _message = $"Saved. Site \"{_siteName}\", {Describe()}, {_schedule.PartitionHours}h partitions, keeping {_retentionDays} day(s).";
     }
 
-    private string Describe() =>
-        _schedule.Mode == "Interval"
-            ? $"every {Math.Max(1, _schedule.IntervalMinutes)} min"
-            : $"daily at {_schedule.DailyAtLocalTime}";
+    private string Describe() => _schedule.Mode switch
+    {
+        "Interval" => $"every {Math.Max(1, _schedule.IntervalMinutes)} min",
+        "Weekly" => $"weekly on {(DayOfWeek)Math.Clamp(_schedule.DayOfWeek, 0, 6)} at {_schedule.DailyAtLocalTime}",
+        "Monthly" => $"monthly on day {_schedule.DayOfMonth} at {_schedule.DailyAtLocalTime}",
+        _ => $"daily at {_schedule.DailyAtLocalTime}",
+    };
 
     private string Preview()
     {
         var site = string.IsNullOrWhiteSpace(_siteName) ? "Site" : Sanitize(_siteName.Trim());
-        return $"{site}-<PLC>.csv";
+        return $"{site}-20260708T0000Z.parquet";
     }
 
     private static string Sanitize(string name) =>

@@ -4,17 +4,57 @@ using Microsoft.Extensions.Options;
 
 namespace PlcDataLogger.Configuration;
 
-/// <summary>How often the scheduled export+upload cycle runs (§5).</summary>
+/// <summary>How often the scheduled Parquet-partition upload runs, and how the data is partitioned (§5).</summary>
 public sealed class ScheduleConfig
 {
-    /// <summary>"Interval" (every <see cref="IntervalMinutes"/>) or "Daily" (once at <see cref="DailyAtLocalTime"/>).</summary>
+    /// <summary>"Interval" (every <see cref="IntervalMinutes"/>) · "Daily" · "Weekly" · "Monthly".
+    /// Daily/Weekly/Monthly run at <see cref="DailyAtLocalTime"/>.</summary>
     public string Mode { get; set; } = "Daily";
 
     /// <summary>Minutes between runs when <see cref="Mode"/> is "Interval".</summary>
     public int IntervalMinutes { get; set; } = 360;
 
-    /// <summary>Local time of day ("HH:mm") to run when <see cref="Mode"/> is "Daily".</summary>
+    /// <summary>Local time of day ("HH:mm") for Daily/Weekly/Monthly.</summary>
     public string DailyAtLocalTime { get; set; } = "02:00";
+
+    /// <summary>Day of week for "Weekly" (0=Sunday … 6=Saturday).</summary>
+    public int DayOfWeek { get; set; } = 1;
+
+    /// <summary>Day of month for "Monthly" (1–28; clamped to the month length).</summary>
+    public int DayOfMonth { get; set; } = 1;
+
+    /// <summary>Time-partition size in hours for the Parquet exports. Must be ≤ the upload period
+    /// (e.g. daily upload ⇒ partition ≤ 24h). Days are expressed as multiples of 24.</summary>
+    public int PartitionHours { get; set; } = 6;
+
+    /// <summary>Keep uploaded partition files locally (pruned once older than the retention window)
+    /// instead of deleting them right after a successful upload.</summary>
+    public bool KeepUploadedPartitions { get; set; } = false;
+
+    /// <summary>The upload cadence expressed in hours, for the partition-size constraint.</summary>
+    public double UploadPeriodHours() => Mode switch
+    {
+        "Interval" => Math.Max(1, IntervalMinutes) / 60.0,
+        "Weekly" => 24 * 7,
+        "Monthly" => 24 * 28,
+        _ => 24, // Daily
+    };
+
+    /// <summary>Returns a validation error, or null if the schedule is usable.</summary>
+    public string? Validate()
+    {
+        if (PartitionHours < 1)
+            return "Partition size must be at least 1 hour.";
+        if (PartitionHours > UploadPeriodHours())
+            return $"Partition size ({PartitionHours} h) must be ≤ the upload period ({UploadPeriodHours():0.#} h).";
+        if (Mode == "Interval" && IntervalMinutes < 1)
+            return "Interval must be at least 1 minute.";
+        if (Mode == "Weekly" && (DayOfWeek < 0 || DayOfWeek > 6))
+            return "Day of week must be 0 (Sunday) to 6 (Saturday).";
+        if (Mode == "Monthly" && (DayOfMonth < 1 || DayOfMonth > 28))
+            return "Day of month must be 1 to 28.";
+        return null;
+    }
 }
 
 /// <summary>The subset of configuration that is editable at runtime via the web UI.</summary>
@@ -213,6 +253,10 @@ public sealed class ConfigStore
         Mode = s.Mode,
         IntervalMinutes = s.IntervalMinutes,
         DailyAtLocalTime = s.DailyAtLocalTime,
+        DayOfWeek = s.DayOfWeek,
+        DayOfMonth = s.DayOfMonth,
+        PartitionHours = s.PartitionHours,
+        KeepUploadedPartitions = s.KeepUploadedPartitions,
     };
 
     private static PlcOptions Clone(PlcOptions p) => new()

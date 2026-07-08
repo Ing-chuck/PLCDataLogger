@@ -105,15 +105,50 @@ public sealed class ExportUploadService : BackgroundService
             return TimeSpan.FromMinutes(Math.Max(1, schedule.IntervalMinutes));
 
         var timeOfDay = ParseTimeOfDay(schedule.DailyAtLocalTime);
-        var todayRun = nowLocal.Date + timeOfDay;
-        var next = todayRun > nowLocal ? todayRun : todayRun.AddDays(1);
+        var next = schedule.Mode.ToLowerInvariant() switch
+        {
+            "weekly" => NextWeekly(nowLocal, timeOfDay, schedule.DayOfWeek),
+            "monthly" => NextMonthly(nowLocal, timeOfDay, schedule.DayOfMonth),
+            _ => NextDaily(nowLocal, timeOfDay),
+        };
         return next - nowLocal;
     }
 
-    private static string Describe(ScheduleConfig s) =>
-        s.Mode.Equals("Interval", StringComparison.OrdinalIgnoreCase)
-            ? $"every {Math.Max(1, s.IntervalMinutes)} min"
-            : $"daily at {s.DailyAtLocalTime}";
+    private static DateTime NextDaily(DateTime now, TimeSpan tod)
+    {
+        var run = now.Date + tod;
+        return run > now ? run : run.AddDays(1);
+    }
+
+    private static DateTime NextWeekly(DateTime now, TimeSpan tod, int dayOfWeek)
+    {
+        var target = (DayOfWeek)Math.Clamp(dayOfWeek, 0, 6);
+        var run = now.Date + tod;
+        var days = ((int)target - (int)run.DayOfWeek + 7) % 7;
+        run = run.AddDays(days);
+        return run > now ? run : run.AddDays(7);
+    }
+
+    private static DateTime NextMonthly(DateTime now, TimeSpan tod, int dayOfMonth)
+    {
+        DateTime RunFor(int year, int month)
+        {
+            var day = Math.Min(Math.Clamp(dayOfMonth, 1, 28), DateTime.DaysInMonth(year, month));
+            return new DateTime(year, month, day) + tod;
+        }
+        var run = RunFor(now.Year, now.Month);
+        if (run > now) return run;
+        var next = now.AddMonths(1);
+        return RunFor(next.Year, next.Month);
+    }
+
+    private static string Describe(ScheduleConfig s) => s.Mode.ToLowerInvariant() switch
+    {
+        "interval" => $"every {Math.Max(1, s.IntervalMinutes)} min",
+        "weekly" => $"weekly on {(DayOfWeek)Math.Clamp(s.DayOfWeek, 0, 6)} at {s.DailyAtLocalTime}",
+        "monthly" => $"monthly on day {Math.Clamp(s.DayOfMonth, 1, 28)} at {s.DailyAtLocalTime}",
+        _ => $"daily at {s.DailyAtLocalTime}",
+    } + $", {Math.Max(1, s.PartitionHours)}h partitions";
 
     private static TimeSpan ParseTimeOfDay(string value) =>
         TimeSpan.TryParseExact(value, @"hh\:mm", CultureInfo.InvariantCulture, out var ts)

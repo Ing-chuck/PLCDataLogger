@@ -298,6 +298,38 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
                 cmd.Parameters.AddWithValue("$end", endMs);
             });
 
+    public IEnumerable<RangeReading> ReadReadingsInRange(long startMs, long endMs)
+    {
+        // Separate read-only connection: WAL lets this stream concurrently with the writer.
+        using var conn = new SqliteConnection($"Data Source={PrimaryPath};Mode=ReadOnly");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT r.id, r.ts_utc, r.ts_received_utc, p.name, t.tag_name, r.value, r.value_text, r.quality
+            FROM readings r
+            JOIN tags t ON t.tag_id = r.tag_id
+            JOIN plcs p ON p.plc_id = t.plc_id
+            WHERE r.ts_utc >= $start AND r.ts_utc < $end
+            ORDER BY r.id;
+            """;
+        cmd.Parameters.AddWithValue("$start", startMs);
+        cmd.Parameters.AddWithValue("$end", endMs);
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            yield return new RangeReading(
+                reader.GetInt64(0),
+                reader.GetInt64(1),
+                reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetDouble(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.GetInt32(7));
+        }
+    }
+
     private IEnumerable<ExportRow> StreamReadings(string whereClause, Action<SqliteCommand> bind)
     {
         // Separate read-only connection: WAL lets this stream concurrently with the writer.
@@ -362,11 +394,120 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
 
     public long GetMaxReadingId() => ScalarLong("SELECT COALESCE(MAX(id), 0) FROM readings;");
 
-    // Safe pruning watermark: the max reading id contained in the last database backup that was
-    // uploaded to the cloud. Retention never prunes past this, so nothing is dropped locally until a
-    // full snapshot of it is safely off-machine. 0 (no backup uploaded yet) means retention holds off.
+    public long GetMinReadingTs() => ScalarLong("SELECT COALESCE(MIN(ts_utc), -1) FROM readings;");
+
+    // Safe pruning watermark: the highest reading id already off-machine — the max of any full DB
+    // backup upload and any uploaded Parquet partition. Retention never prunes past this, so nothing
+    // is dropped locally until a copy of it has reached the cloud. 0 means nothing uploaded yet.
     public long GetMaxUploadedReadingId() =>
-        ScalarLong("SELECT COALESCE(CAST(value AS INTEGER), 0) FROM settings WHERE key = 'backup_uploaded_reading_id';");
+        ScalarLong("""
+            SELECT MAX(w) FROM (
+                SELECT COALESCE(CAST(value AS INTEGER), 0) AS w FROM settings WHERE key = 'backup_uploaded_reading_id'
+                UNION ALL
+                SELECT COALESCE(MAX(max_reading_id), 0) FROM parquet_partitions WHERE uploaded_at IS NOT NULL
+            );
+            """);
+
+    public long GetPartitionExportCursor() =>
+        ScalarLong("SELECT COALESCE(CAST(value AS INTEGER), 0) FROM settings WHERE key = 'parquet_export_cursor';");
+
+    public void SetPartitionExportCursor(long endMs)
+    {
+        lock (_gate)
+        {
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO settings (key, value) VALUES ('parquet_export_cursor', $v)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                """;
+            cmd.Parameters.AddWithValue("$v", endMs);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    public void RecordPartitionExport(long partitionStart, int partitionHours, string fileName, int rowCount, long maxReadingId)
+    {
+        lock (_gate)
+        {
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO parquet_partitions
+                    (partition_start, partition_hours, file_name, row_count, max_reading_id, exported_at, local_deleted)
+                VALUES ($start, $hours, $name, $rows, $maxId, $now, 0)
+                ON CONFLICT(partition_start) DO UPDATE SET
+                    partition_hours = excluded.partition_hours,
+                    file_name       = excluded.file_name,
+                    row_count       = excluded.row_count,
+                    max_reading_id  = excluded.max_reading_id,
+                    exported_at     = excluded.exported_at,
+                    uploaded_at     = NULL,
+                    local_deleted   = 0;
+                """;
+            cmd.Parameters.AddWithValue("$start", partitionStart);
+            cmd.Parameters.AddWithValue("$hours", partitionHours);
+            cmd.Parameters.AddWithValue("$name", fileName);
+            cmd.Parameters.AddWithValue("$rows", rowCount);
+            cmd.Parameters.AddWithValue("$maxId", maxReadingId);
+            cmd.Parameters.AddWithValue("$now", IsoNow());
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    public IReadOnlyList<PartitionUpload> GetPendingPartitionUploads()
+    {
+        lock (_gate)
+        {
+            var list = new List<PartitionUpload>();
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT partition_start, file_name, max_reading_id
+                FROM parquet_partitions
+                WHERE uploaded_at IS NULL AND local_deleted = 0
+                ORDER BY partition_start;
+                """;
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                list.Add(new PartitionUpload(reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2)));
+            return list;
+        }
+    }
+
+    public void MarkPartitionUploaded(long partitionStart) =>
+        ExecutePartitionUpdate("UPDATE parquet_partitions SET uploaded_at = $now, local_deleted = local_deleted WHERE partition_start = $start;", partitionStart);
+
+    public void MarkPartitionLocalDeleted(long partitionStart) =>
+        ExecutePartitionUpdate("UPDATE parquet_partitions SET local_deleted = 1 WHERE partition_start = $start;", partitionStart);
+
+    private void ExecutePartitionUpdate(string sql, long partitionStart)
+    {
+        lock (_gate)
+        {
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = sql;
+            if (sql.Contains("$now")) cmd.Parameters.AddWithValue("$now", IsoNow());
+            cmd.Parameters.AddWithValue("$start", partitionStart);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    public IReadOnlyList<(long PartitionStart, string FileName)> GetKeptPartitionsBefore(long cutoffStartMs)
+    {
+        lock (_gate)
+        {
+            var list = new List<(long, string)>();
+            using var cmd = Conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT partition_start, file_name FROM parquet_partitions
+                WHERE uploaded_at IS NOT NULL AND local_deleted = 0 AND partition_start < $cutoff
+                ORDER BY partition_start;
+                """;
+            cmd.Parameters.AddWithValue("$cutoff", cutoffStartMs);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                list.Add((reader.GetInt64(0), reader.GetString(1)));
+            return list;
+        }
+    }
 
     public void SetBackupUploadedReadingId(long readingId)
     {
@@ -605,6 +746,19 @@ public sealed class LoggerDatabase : IReadingStore, IDisposable
         CREATE TABLE IF NOT EXISTS settings (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+
+        -- One row per exported Parquet time-partition: tracks upload state (for retry), the max
+        -- reading id it contains (retention watermark), and whether the local file still exists.
+        CREATE TABLE IF NOT EXISTS parquet_partitions (
+            partition_start INTEGER PRIMARY KEY,   -- epoch-ms UTC of the partition start
+            partition_hours INTEGER NOT NULL,
+            file_name       TEXT NOT NULL,
+            row_count       INTEGER NOT NULL,
+            max_reading_id  INTEGER NOT NULL,
+            exported_at     TEXT NOT NULL,
+            uploaded_at     TEXT,
+            local_deleted   INTEGER NOT NULL DEFAULT 0
         );
         """;
 }

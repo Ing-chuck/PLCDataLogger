@@ -22,7 +22,7 @@
             </div>
             <div class="head-actions">
                 <button class="btn primary" @onclick="ExportNow" disabled="@_running">
-                    @(_running ? "Working…" : "Back up & upload now")
+                    @(_running ? "Working…" : "Upload partitions now")
                 </button>
                 @if (_runMessage is not null)
                 {

@@ -1,8 +1,9 @@
 # PLC Data Logger
 
 A site-deployed service that reads tag data from one or more **Codesys V3 (Eaton) PLCs**
-over **OPC UA**, persists it locally to **SQLite**, and (later) syncs it to cloud storage.
-One reusable binary per site — behaviour is driven entirely by configuration, not code.
+over **OPC UA**, persists it locally to **SQLite**, and syncs it to cloud storage as compressed,
+time-partitioned **Parquet**. One reusable binary per site — behaviour is driven entirely by
+configuration, not code.
 
 The full design rationale lives in the architecture document; this README covers what is
 currently built and how to run it.
@@ -13,12 +14,13 @@ currently built and how to run it.
   read/subscribe service calls; there is no write code path.
 - **Store-and-forward** — everything is written to durable local storage first. Cloud upload
   (when added) is a secondary, retryable step; the system is fully useful with no internet.
-- **Configuration over code** — endpoints, tag filters, sample rates, etc. live in
-  `appsettings.json` per deployment. The binary does not change between sites.
+- **Configuration over code** — endpoints, schedule, tag selection, etc. live in per-site
+  configuration (`appsettings.json` seeds plus the web-UI-managed `config.local.json`). The binary
+  does not change between sites.
 
 ## Status
 
-**Phases 1–4 (status/observability) are implemented and validated against a live PLC:**
+**Built and validated against a live PLC** (see [Roadmap](#roadmap) for the phase breakdown):
 
 - Connects to one or more Codesys OPC UA servers (one session per PLC, independent reconnect).
 - Auto-discovers tags by browsing the address space (with continuation-point paging), filtered
@@ -29,17 +31,17 @@ currently built and how to run it.
   tags that disappear are marked inactive, never deleted, so history is preserved.
 - Runs as a **Windows Service** (auto-start, auto-restart on failure) for unattended operation,
   or as a console app for development — see [Run as a Windows Service](#run-as-a-windows-service).
-- Exports readings to **CSV** on a daily schedule and optionally uploads them via a pluggable
-  cloud provider, then prunes old data under a retention policy — see
+- Uploads **time-partitioned Parquet** (zstd) on a configurable schedule and prunes old data under a
+  retention policy; CSV and full-database backups remain as on-demand options — see
   [Export, upload & retention](#export-upload--retention).
 - Serves a **localhost-only web UI** (status dashboard + configuration) plus JSON endpoints. The
-  config pages edit PLC connections and upload settings **live, without a restart**, and a
-  **network scan** discovers OPC UA servers on the LAN for setup — see
+  config pages edit PLCs, the tag-logging selection, the schedule and upload settings **live,
+  without a restart**, and a **network scan** discovers OPC UA servers on the LAN for setup — see
   [Web UI](#web-ui) and [Status dashboard & health](#status-dashboard--health).
 
 Google Drive upload (incl. the OAuth consent flow) has been validated end-to-end. Not yet
 end-to-end tested: certificate-trust acceptance for secured OPC UA policies (needs a secured
-endpoint). Remaining work: multi-site hardening (Phase 5) — see [Roadmap](#roadmap).
+endpoint).
 
 ## Requirements
 
@@ -107,12 +109,17 @@ All settings live under the `Logger` section of [`appsettings.json`](appsettings
 | `Discovery.Filter` | Which discovered variables are logged — see below. |
 | `Subscription.*` | Publishing/sampling intervals and per-item server queue depth. |
 | `Plcs[]` | One entry per PLC: name, OPC UA endpoint, and security policy. |
-| `Storage.RetentionDays` | Prune readings older than this (0 = keep everything). |
-| `Export.DailyAtLocalTime` | Local time of day to run the CSV export, `HH:mm`. |
-| `Export.RunOnStartup` | Run one export shortly after startup (dev/verification). |
+| `Storage.RetentionDays` | Seeds the retention window (runtime-editable on the Settings page). |
+| `Export.DailyAtLocalTime` | Seeds the initial upload-schedule time, `HH:mm` (runtime-editable). |
+| `Export.RunOnStartup` | Run one upload cycle shortly after startup (dev/verification). |
 | `Upload.Provider` | `None` (default) or `GoogleDrive`. |
 | `Upload.DestinationFolder` | Remote folder name files are uploaded into. |
 | `WebUi.Port` | Localhost port for the status dashboard and `/api/health`. |
+
+> **Static defaults vs. runtime config.** `appsettings.json` holds the static seed defaults. The
+> **site name, upload schedule, partition size, retention window, PLC connections, upload settings**
+> and **per-tag logging selection** are edited **live via the web UI** and persisted to
+> `config.local.json` next to the executable — which then takes precedence.
 
 ### Tag discovery & filtering
 
@@ -136,7 +143,8 @@ no code change required.
 > **Security note:** `SecurityPolicy: "None"` is for commissioning on a trusted/isolated
 > network. Production deployments should use a real policy (e.g. `Basic256Sha256`) with explicit
 > certificate trust. The client currently auto-accepts untrusted server certificates for
-> commissioning; this will be replaced with explicit trust handling when the config UI is built.
+> commissioning; explicit certificate-trust handling for secured endpoints is wired in but not yet
+> end-to-end tested.
 
 ## Running
 
@@ -160,10 +168,11 @@ The high-volume `readings` table is tuned for time-series throughput and footpri
 - **Retention** prunes in bounded batches and reclaims space via `auto_vacuum=INCREMENTAL`, avoiding
   a full-file `VACUUM` lock.
 
-This comfortably covers the design target of ~50–150 change-events/sec (tens of GB per quarter). At
-sustained hundreds/sec, the next steps would be monthly partitioning (instant drop instead of
-delete) and, if needed, a compressed columnar long-term store (DuckDB/Parquet) — all behind the same
-`IReadingStore` seam, keeping the embedded, server-less deployment model.
+This comfortably covers the design target of ~50–150 change-events/sec (tens of GB per quarter). For
+long-term/off-machine storage the scheduled upload already emits a compressed columnar format
+(zstd **Parquet**, see [Export, upload & retention](#export-upload--retention)); if sustained
+hundreds/sec ever pressured the local store, the next step would be monthly table partitioning (instant
+drop instead of delete) behind the same `IReadingStore` seam, keeping the embedded, server-less model.
 
 ### Deadbands (volume reduction)
 
@@ -182,9 +191,9 @@ is trivial on a LAN).
 
 Long/narrow schema (one row per reading), so adding/removing tags never needs a migration:
 `plcs`, `tags` (incl. `active` and user-selected `enabled` flags), `readings` (`ts_utc` epoch-ms,
-`value`/`value_text`, `quality` code), `export_state` (per-PLC CSV export state), and `settings`
-(incl. the backup-upload retention watermark). Open `data/plcdata.db` with any SQLite tool —
-timestamps are epoch-ms, e.g.:
+`value`/`value_text`, `quality` code), `export_state` (per-PLC CSV export state), `parquet_partitions`
+(scheduled Parquet upload state + retention watermark), and `settings`. Open `data/plcdata.db` with any
+SQLite tool — timestamps are epoch-ms, e.g.:
 
 ```sql
 SELECT t.tag_name, datetime(r.ts_utc/1000, 'unixepoch') AS ts, r.value, r.quality
@@ -234,16 +243,23 @@ To remove the service (leaving the install directory and data in place):
 
 ## Export, upload & retention
 
-**Scheduled backup upload.** On the configured schedule the logger uploads a **single, overwritten
-database backup** — a consistent one-file snapshot of the whole SQLite store (via `VACUUM INTO`, safe
-while logging continues) named `{SiteName}-backup.db`, re-uploaded over the same cloud file each cycle.
-A fresh local copy is written even with no internet (`None` provider), for manual pickup (USB/RDP). Set
-`Export.RunOnStartup: true` to run one shortly after startup. Because the backup mirrors the local
-store, it reflects the retention window — data pruned locally drops out of the next backup too.
+**Scheduled Parquet upload.** On the configured schedule the logger uploads **time-partitioned Parquet
+files** (zstd, columnar) — one file per time window of the configured size, named
+`{SiteName}-{yyyyMMddThhmm}Z.parquet` and covering all PLCs (`plc_name` is a column). Only fully-elapsed
+windows are written; each is a small **incremental** file uploaded **once**, so per-cycle bandwidth
+scales with _new_ data, not the whole retention window. Columnar + zstd is dramatically smaller than
+raw SQLite or CSV (≈**28× smaller than CSV** on real data). Set `Export.RunOnStartup: true` to run a
+cycle shortly after startup.
 
-**Schedule.** The cadence is set on the **Settings** page — either _every N minutes_ or _daily at a
-fixed local time_. Changes take effect immediately (the scheduler re-plans without a restart).
-`Export.DailyAtLocalTime` in appsettings seeds the initial value.
+After a successful upload each partition file is **deleted locally** by default; enable _keep uploaded
+partitions_ on Settings to retain them until they age past the retention window. Files not yet uploaded
+(e.g. offline) stay on disk and retry next cycle. Partition state lives in the `parquet_partitions`
+table (which also drives the retention watermark); local files live in `exports/partitions/`.
+
+**Schedule.** Set on the **Settings** page — _every N minutes_, _daily_, _weekly_ (day + time), or
+_monthly_ (day + time) — plus the **partition size** (hours; use multiples of 24 for days), which must
+be **≤ the upload period** (e.g. daily upload ⇒ partition ≤ 24h). Changes take effect immediately (the
+scheduler re-plans without a restart). `Export.DailyAtLocalTime` in appsettings seeds the initial value.
 
 **CSV export (on demand).** CSV was found cumbersome for large sites, so it is no longer uploaded on
 the schedule — but the option remains on the **Backup** page:
@@ -255,12 +271,12 @@ the schedule — but the option remains on the **Backup** page:
   `{SiteName}-{PlcName}-{start}_{end}.csv`, handy for pulling a specific incident window.
 
 **Timestamped database archive (on demand).** The **Backup** page can also upload a
-`{SiteName}-backup-{timestamp}.db` snapshot — a keep-forever archive kept alongside the single rolling
-backup the schedule maintains.
+`{SiteName}-backup-{timestamp}.db` snapshot (`VACUUM INTO`) — a keep-forever full-database archive,
+independent of the scheduled Parquet partitions.
 
-**Cloud upload (pluggable).** Uploads go through the configured `ICloudUploadProvider`, **overwriting
-the same destination file** (rolling backup / CSV) rather than accumulating dated copies; timestamped
-archives are the deliberate exception. Upload runs entirely off the logging hot path: failures are
+**Cloud upload (pluggable).** Uploads go through the configured `ICloudUploadProvider`. Scheduled
+Parquet partitions and one-off exports are each uploaded once; the rolling CSV and the DB backups
+overwrite the same destination file. Upload runs entirely off the logging hot path: failures are
 retried on the next cycle and never slow down or block recording.
 
 - **`None`** (default) — does nothing and is a fully supported permanent state for offline sites.
@@ -278,9 +294,9 @@ retried on the next cycle and never slow down or block recording.
 the retention window (set on the **Settings** page; `Storage.RetentionDays` seeds it), in one of two
 modes:
 
-- **Upload enabled** (a real provider) — only prune readings that are already contained in a
-  **database backup that was uploaded** (the backup upload advances the pruning watermark); data not
-  yet backed up to the cloud is never dropped.
+- **Upload enabled** (a real provider) — only prune readings already **uploaded** (in a Parquet
+  partition, or a manual DB backup — whichever reached furthest advances the pruning watermark); data
+  not yet in the cloud is never dropped.
 - **Upload disabled** (`None`) — prune purely by age. Very old data at offline sites is then only
   retrievable directly from the machine.
 
@@ -292,13 +308,13 @@ service (§11). Browse to `http://localhost:5198/`.
 
 | Page | Purpose |
 | --- | --- |
-| **Dashboard** | Live status, plus a **Back up & upload now** button to run the scheduled database-backup upload on demand. |
+| **Dashboard** | Live status, plus an **Upload partitions now** button to run the scheduled Parquet export/upload on demand. |
 | **PLCs** | Add / edit / remove PLC connections. Changes apply **live** — sessions are added, removed, or reconnected without a service restart (§5). |
 | **Scan** | Discover OPC UA servers on the local subnet (TCP 4840 sweep + FindServers enrichment) and add one as a PLC with one click. |
 | **Tags** | Choose which discovered tags are logged, in a **subtree tree** (folders per `GLOBALES` / `fb_BREC1` …). Every tag is logged by default; deselecting one stops new readings for it (history is kept). Saving rebuilds the live subscription without a restart. |
 | **Upload** | Choose the cloud provider, edit its settings (with a **Browse…** server-side file/folder picker for the credentials/token paths), test the connection, and run the Google OAuth consent. |
 | **Backup** | On-demand: export **all tags** or a **time window** to CSV, or upload a timestamped **raw SQLite database backup** (`VACUUM INTO` snapshot). |
-| **Settings** | Set the **site name** (labels the dashboard and export files), the **upload schedule** (interval or daily time), and the **retention window** (days of readings to keep). |
+| **Settings** | Set the **site name**, the **upload schedule** (interval / daily / weekly / monthly), the **partition size**, whether to **keep** uploaded partitions, and the **retention window**. |
 
 Editable configuration (PLC connections and upload settings) is stored in `config.local.json`
 next to the executable — seeded from `appsettings.json` on first run, then owned by the UI.
@@ -311,7 +327,7 @@ GET    /api/scan             discover OPC UA servers on the LAN
 GET    /api/plcs             list configured PLCs
 POST   /api/plcs             add/replace a PLC  { name, endpointUrl, securityPolicy }
 DELETE /api/plcs/{name}      remove a PLC
-POST   /api/backup-now       upload the rolling database backup immediately (the scheduled action)
+POST   /api/backup-now       run the scheduled Parquet partition export + upload immediately
 POST   /api/export-now       run a CSV export + upload pass immediately (on-demand option)
 ```
 
@@ -331,19 +347,19 @@ configured provider, so a genuinely failing upload stands out (§9).
 ## Project layout
 
 ```text
-Configuration/   Options, runtime-editable ConfigStore (config.local.json)
+Configuration/   Options, runtime-editable ConfigStore (config.local.json), validation
 OpcUa/           OPC UA app config, per-PLC session, discovery + tag filter, manager, network scanner
-Storage/         IReadingStore + optimized SQLite store, buffer, batched writer, CSV export, retention
+Storage/         IReadingStore + optimized SQLite store, buffer, batched writer, CSV + Parquet export, retention
 Upload/          Pluggable cloud upload (None + Google Drive, DPAPI token store, provider resolver)
-Export/          Scheduled export + upload orchestration
+Export/          Scheduled Parquet-partition upload + on-demand CSV/backup orchestration
 Health/          Runtime health collector surfaced to the web UI
-Components/      Blazor Server UI (layout/nav, Dashboard, PLCs, Scan, Upload)
+Components/      Blazor Server UI (Dashboard, PLCs, Scan, Tags, Upload, Backup, Settings)
 Program.cs       Web host wiring (Serilog + Windows Service + hosted services + Blazor + APIs)
-scripts/         Windows Service install / uninstall (PowerShell)
+scripts/         Windows Service install / uninstall + distribution packaging (PowerShell)
 ```
 
 Built on the OPC Foundation reference stack (`OPCFoundation.NetStandard.Opc.Ua.Client`),
-`Microsoft.Data.Sqlite`, `Google.Apis.Drive.v3`, and `Serilog`.
+`Microsoft.Data.Sqlite`, `Parquet.Net`, `Google.Apis.Drive.v3`, and `Serilog`.
 
 ## Roadmap
 
@@ -351,11 +367,12 @@ Built on the OPC Foundation reference stack (`OPCFoundation.NetStandard.Opc.Ua.C
 | --- | --- | --- |
 | 1 | Core logging: OPC UA discovery/subscription → SQLite | ✅ Done |
 | 2 | Multi-PLC + Windows Service hosting with auto-restart recovery | ✅ Done |
-| 3 | CSV export + pluggable cloud upload (Google Drive), retention/pruning | ✅ Done |
+| 3 | Export + pluggable cloud upload (Google Drive), retention/pruning | ✅ Done |
 | 4a | Observability: localhost status dashboard + `/api/health`, health monitor | ✅ Done |
 | 4b | Config UI: edit PLCs (live hot-reload), network scan, upload settings + JSON APIs | ✅ Done |
 | 4b* | Google Drive upload + OAuth consent (validated); cert-trust acceptance still untested | Mostly done |
 | 5 | Multi-site hardening: config validation, packaging/install, field docs | ✅ Done |
+| 6 | Data pipeline: per-tag logging selection, scheduled zstd-Parquet time-partition uploads (interval/daily/weekly/monthly), on-demand CSV/DB backups | ✅ Done |
 
 For on-site install/configure/verify/update/troubleshoot steps, see
 **[DEPLOYMENT.md](DEPLOYMENT.md)**.

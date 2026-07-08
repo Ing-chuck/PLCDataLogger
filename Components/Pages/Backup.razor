@@ -4,8 +4,8 @@
 
 <h1>Backup &amp; Export</h1>
 <p class="sub">
-    The scheduled cloud upload is a single, overwritten database backup (<code>{Site}-backup.db</code>).
-    These are additional on-demand actions.
+    The scheduled cloud upload sends zstd-compressed Parquet time-partitions. These are additional
+    on-demand actions.
 </p>
 
 <div class="form">
@@ -54,8 +54,8 @@
     <h2 class="section">Back up the database</h2>
     <p class="muted small">
         Uploads a consistent snapshot of the whole SQLite database as
-        <code>{Site}-backup-{timestamp}.db</code> — a <em>timestamped archive</em> kept alongside the
-        single rolling <code>{Site}-backup.db</code> that the schedule maintains.
+        <code>{Site}-backup-{timestamp}.db</code> — a <em>timestamped archive</em>, independent of the
+        scheduled Parquet partitions.
     </p>
     <div class="actions">
         <button class="btn primary" @onclick="BackupDatabase" disabled="@_busy">

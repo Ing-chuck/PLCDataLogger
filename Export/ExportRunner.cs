@@ -22,6 +22,7 @@ public sealed class ExportRunner
     private readonly LoggerOptions _options;
     private readonly ConfigStore _config;
     private readonly CsvExporter _exporter;
+    private readonly ParquetExporter _parquet;
     private readonly IReadingStore _db;
     private readonly UploadProviderResolver _providers;
     private readonly ILogger<ExportRunner> _log;
@@ -30,6 +31,7 @@ public sealed class ExportRunner
         IOptions<LoggerOptions> options,
         ConfigStore config,
         CsvExporter exporter,
+        ParquetExporter parquet,
         IReadingStore db,
         UploadProviderResolver providers,
         ILogger<ExportRunner> log)
@@ -37,28 +39,138 @@ public sealed class ExportRunner
         _options = options.Value;
         _config = config;
         _exporter = exporter;
+        _parquet = parquet;
         _db = db;
         _providers = providers;
         _log = log;
     }
 
+    private string PartitionsDir => Path.Combine(Path.GetFullPath(_options.Export.DirectoryPath), "partitions");
+
     /// <summary>
-    /// The scheduled action: upload a single, overwritten database backup (<c>{Site}-backup.db</c>) —
-    /// the whole SQLite store as one file, re-uploaded over the same cloud file each cycle. Advances
-    /// the retention watermark on success so old readings can be pruned once safely in the cloud.
+    /// The scheduled action: write any completed time partitions to zstd Parquet, upload every
+    /// partition not yet uploaded, then delete the local copies (or keep them until they age past the
+    /// retention window). Uploading a partition advances the retention watermark so its readings can
+    /// be pruned locally once safely in the cloud.
     /// </summary>
     public async Task<ExportRunResult> RunScheduledUploadAsync(CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var fileName = $"{Sanitize(_config.GetSiteName())}-backup.db";
-            return await BackupAndUploadAsync(fileName, ct).ConfigureAwait(false);
+            var schedule = _config.GetSchedule();
+            var exported = await ExportPartitionsAsync(schedule, ct).ConfigureAwait(false);
+
+            var pending = _db.GetPendingPartitionUploads();
+            var (uploaded, failed) = await UploadPartitionsAsync(pending, schedule.KeepUploadedPartitions, ct).ConfigureAwait(false);
+
+            if (schedule.KeepUploadedPartitions)
+                CleanupKeptPartitions();
+
+            var msg = $"Exported {exported} new partition file(s)." + UploadSuffix(uploaded, failed, pending.Count);
+            return new ExportRunResult(0, uploaded, failed, msg);
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>Write Parquet files for every completed partition not yet exported. Partitions align
+    /// to UTC boundaries of the configured size; only fully-elapsed windows are written.</summary>
+    private async Task<int> ExportPartitionsAsync(ScheduleConfig schedule, CancellationToken ct)
+    {
+        var minTs = _db.GetMinReadingTs();
+        if (minTs < 0) return 0; // no readings yet
+
+        var partHours = Math.Max(1, schedule.PartitionHours);
+        var partMs = partHours * 3_600_000L;
+        var site = Sanitize(_config.GetSiteName());
+
+        var cursor = _db.GetPartitionExportCursor();
+        var startFrom = Math.Max(minTs, cursor);
+        var firstStart = startFrom / partMs * partMs;
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var lastCompletedStart = nowMs / partMs * partMs - partMs; // last fully-elapsed window
+
+        var files = 0;
+        for (var start = firstStart; start <= lastCompletedStart; start += partMs)
+        {
+            if (ct.IsCancellationRequested) break;
+            var end = start + partMs;
+            var fileName = $"{site}-{DateTimeOffset.FromUnixTimeMilliseconds(start).UtcDateTime:yyyyMMddTHHmm}Z.parquet";
+            var filePath = Path.Combine(PartitionsDir, fileName);
+
+            var result = await _parquet.ExportAsync(_db.ReadReadingsInRange(start, end), filePath, ct).ConfigureAwait(false);
+            if (result.RowCount > 0)
+            {
+                _db.RecordPartitionExport(start, partHours, fileName, result.RowCount, result.MaxReadingId);
+                _log.LogInformation("Partition: wrote {Rows} readings to {File}.", result.RowCount, fileName);
+                files++;
+            }
+            _db.SetPartitionExportCursor(end); // advance past this window (empty ones aren't revisited)
+        }
+        return files;
+    }
+
+    private async Task<(int Uploaded, int Failed)> UploadPartitionsAsync(
+        IReadOnlyList<PartitionUpload> pending, bool keep, CancellationToken ct)
+    {
+        var provider = _providers.Current;
+        if (pending.Count == 0 || !await provider.IsConfiguredAsync(ct).ConfigureAwait(false))
+            return (0, 0);
+
+        var uploaded = 0;
+        var failed = 0;
+        foreach (var item in pending)
+        {
+            if (ct.IsCancellationRequested) break;
+            var path = Path.Combine(PartitionsDir, item.FileName);
+            if (!File.Exists(path))
+            {
+                _log.LogWarning("Partition {File} missing on disk; marking done to stop retrying.", item.FileName);
+                _db.MarkPartitionLocalDeleted(item.PartitionStart);
+                continue;
+            }
+
+            try
+            {
+                await provider.UploadAsync(path, _providers.DestinationFolder, ct).ConfigureAwait(false);
+                _db.MarkPartitionUploaded(item.PartitionStart);
+                _log.LogInformation("Uploaded {File}.", item.FileName);
+                uploaded++;
+                if (!keep)
+                {
+                    TryDelete(path);
+                    _db.MarkPartitionLocalDeleted(item.PartitionStart);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Upload of {File} failed.", item.FileName);
+                failed++;
+                break; // connectivity — stop; the local file remains and retries next cycle.
+            }
+        }
+        return (uploaded, failed);
+    }
+
+    private void CleanupKeptPartitions()
+    {
+        var retentionDays = _config.GetRetentionDays();
+        if (retentionDays <= 0) return; // keep forever
+
+        var cutoff = DateTimeOffset.UtcNow.AddDays(-retentionDays).ToUnixTimeMilliseconds();
+        foreach (var (start, fileName) in _db.GetKeptPartitionsBefore(cutoff))
+        {
+            TryDelete(Path.Combine(PartitionsDir, fileName));
+            _db.MarkPartitionLocalDeleted(start);
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort */ }
     }
 
     /// <summary>On-demand rolling CSV export + upload: one overwritten <c>{Site}-{Plc}.csv</c> per PLC

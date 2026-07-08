@@ -19,8 +19,9 @@ architecture and feature detail, see [README.md](README.md).
 | Outbound (Internet) | Logger PC → `*.googleapis.com`, `accounts.google.com` | TCP **443** | Google Drive upload *(only if enabled)* |
 | Local only | Operator browser → Logger PC | TCP **5198** (default, **localhost only**) | Status/config web UI |
 
-If there is **no internet**, that's fully supported — leave the upload provider as `None`; CSV
-exports are still produced locally for manual pickup.
+If there is **no internet**, that's fully supported — leave the upload provider as `None`. Parquet
+partitions are still written locally under `exports\partitions\` for manual pickup (they aren't
+deleted until uploaded), and CSV/DB backups can be produced on demand from the **Backup** page.
 
 ## 3. Install
 
@@ -69,7 +70,8 @@ Open `http://localhost:5198/` on the PC and use the web UI (the primary configur
    service then picks it up (restart it if needed). The OAuth **client** JSON is the same across all
    sites; only this one-time consent is per-machine.
 4. **Settings** — set the **site name** (labels the dashboard and export files), the **upload
-   schedule** (every N minutes or daily at a time), and the **retention window** (days to keep).
+   schedule** (interval / daily / weekly / monthly), the **partition size** and keep option, and the
+   **retention window** (days to keep).
    Applied live, no restart.
 5. **Backup** *(optional, on demand)* — export an arbitrary **time window** to a one-off per-PLC CSV,
    or upload a **raw SQLite database backup** (`VACUUM INTO` snapshot).
@@ -77,7 +79,8 @@ Open `http://localhost:5198/` on the PC and use the web UI (the primary configur
    (raise to cut volume from noisy analog tags), discovery filter, and check intervals.
 
 Per-site settings live in two files next to the exe: `appsettings.json` (static seed defaults) and
-`config.local.json` (site name, schedule, retention, PLCs + upload — written by the UI).
+`config.local.json` (site name, schedule, partition size, retention, PLCs + upload — written by the
+UI). The per-tag logging selection is stored in the database.
 
 ## 5. Verify
 
@@ -87,7 +90,8 @@ Per-site settings live in two files next to the exe: `appsettings.json` (static 
 - **Config check:** `curl http://localhost:5198/api/config/validate` (empty list = OK).
 - **Logs:** `<install>\logs\plcdatalogger-*.log` (rolling daily). Startup logs a configuration
   validation summary.
-- **Data:** `<install>\data\plcdata.db` (SQLite). Exports land in `<install>\exports\`.
+- **Data:** `<install>\data\plcdata.db` (SQLite). Scheduled Parquet partitions land in
+  `<install>\exports\partitions\`; on-demand CSV/DB backups in `<install>\exports\`.
 
 ## 6. Update
 
@@ -102,9 +106,10 @@ The dashboard footer shows the running version, so you can confirm the update to
 
 - The SQLite database is the source of truth. With upload enabled, data is pruned past
   `RetentionDays` only **after** it's confirmed uploaded; offline, it's pruned purely by age.
-- To pull data off an offline machine: copy the latest files from `exports\`, or copy
-  `data\plcdata.db` (WAL mode — copy `*.db`, `*.db-wal`, `*.db-shm` together, or stop the service
-  first for a clean copy).
+- To pull data off an offline machine: copy the Parquet partitions from `exports\partitions\` (enable
+  *keep uploaded partitions* on Settings so they aren't deleted), export CSV/DB backups on demand from
+  the **Backup** page, or copy `data\plcdata.db` (WAL mode — copy `*.db`, `*.db-wal`, `*.db-shm`
+  together, or stop the service first for a clean copy).
 
 ## 8. Security checklist
 

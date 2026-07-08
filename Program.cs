@@ -60,6 +60,7 @@ try
     builder.Services.AddSingleton<ReadingBuffer>();
     builder.Services.AddSingleton<IReadingStore, LoggerDatabase>();
     builder.Services.AddSingleton<CsvExporter>();
+    builder.Services.AddSingleton<ParquetExporter>();
     builder.Services.AddSingleton<HealthMonitor>();
 
     // Runtime-editable configuration (PLCs + upload) and the network scanner that backs the UI.
