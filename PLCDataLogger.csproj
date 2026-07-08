@@ -11,8 +11,9 @@
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
 
-  <!-- Never publish per-site secrets or runtime data. The Web SDK auto-includes every *.json as
-       content, which would otherwise sweep secrets/ and config.local.json into the output/zip. -->
+  <!-- Never publish per-site secrets, runtime data, local analysis files, or packaging output.
+       The Web SDK auto-includes every *.json as content, which would otherwise sweep secrets/ and
+       config.local.json (and dashboards/*.json, dist/**/*.json) into the output/zip. -->
   <ItemGroup>
     <Content Remove="secrets/**" />
     <Content Remove="pki/**" />
@@ -22,6 +23,8 @@
     <Content Remove="google_token/**" />
     <Content Remove="google_client.json" />
     <Content Remove="config.local.json" />
+    <Content Remove="dashboards/**" />
+    <Content Remove="dist/**" />
   </ItemGroup>
 
   <ItemGroup>

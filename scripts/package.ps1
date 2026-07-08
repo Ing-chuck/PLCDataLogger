@@ -52,7 +52,7 @@ foreach ($doc in @('COMMISSIONING.md', 'DEPLOYMENT.md', 'README.md')) {
 # 3) Defensively scrub any per-site secrets or runtime data that must never ship, in case the
 #    publish step ever picks one up. Credentials are placed on-site after install, never bundled.
 foreach ($secret in @('secrets', 'pki', 'data', 'logs', 'exports', 'google_token',
-                       'google_client.json', 'config.local.json')) {
+                       'google_client.json', 'config.local.json', 'dashboards', 'dist')) {
     $target = Join-Path $stage $secret
     if (Test-Path $target) {
         Write-Host "Scrubbing '$secret' from the package." -ForegroundColor Yellow
